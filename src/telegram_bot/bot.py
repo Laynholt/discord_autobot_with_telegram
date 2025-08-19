@@ -164,6 +164,7 @@ class TelegramBotController:
             return
             
         status = "✅ Включена" if self.discord_bot.should_send_mark_message else "❌ Отключена"
+        next_send_time = self.discord_bot.next_target_time
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="🔄 Переключить", callback_data="toggle_auto_mark"))
@@ -172,7 +173,8 @@ class TelegramBotController:
         await callback.message.edit_text(
             f"🔔 **Ежедневная автоотметка**\n\n"
             f"Автоматическая отправка сообщений в рабочие дни (пн-пт) с 10:30 до 12:00 МСК\n\n"
-            f"Текущий статус: {status}",
+            f"Текущий статус: {status}\n"
+            f"Следующая отправка: {next_send_time}",
             reply_markup=builder.as_markup(),
             parse_mode="Markdown"
         )
