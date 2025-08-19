@@ -54,14 +54,16 @@ uv run src/main.py
 ## Архитектура проекта
 
 ```
-src/
-├── main.py               # Главная точка входа
-├── utils.py              # Управление конфигурацией
-├── discord_bot/
-│   └── bot.py            # Discord бот
-├── telegram_bot/
-│   └── bot.py            # Telegram бот
-└── custom_logger/
-    ├── __init__.py
-    └── custom_logger.py  # Система логирования
+repo/
+├──.env                       # Файл с токенами и id
+└──src/
+    ├── main.py               # Главная точка входа
+    ├── utils.py              # Управление конфигурацией
+    ├── discord_bot/
+    │   └── bot.py            # Discord бот
+    ├── telegram_bot/
+    │   └── bot.py            # Telegram бот
+    └── custom_logger/
+        ├── __init__.py
+        └── custom_logger.py  # Система логирования
 ```
