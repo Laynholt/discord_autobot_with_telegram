@@ -1,0 +1,18 @@
+[project]
+name = "telegram_bot_for_discord"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiogram>=3.22.0",
+    "aiohttp>=3.7.4",
+    "asyncio>=4.0.0",
+    "audioop-lts>=0.2.2",
+    "colorama>=0.4.6",
+    "curl-cffi>=0.11.4",
+    "discord-protos<1.0.0",
+    "discord-py-self>=2.0.1",
+    "pytz>=2025.2",
+    "tzlocal>=4.0.0",
+]
