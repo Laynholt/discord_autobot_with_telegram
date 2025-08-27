@@ -6,12 +6,19 @@ import asyncio
 import discord
 import calendar
 from pathlib import Path
-from typing import List, Optional
 from datetime import datetime, time, timedelta
 
 from utils import load_env_config
 
 _log = logging.getLogger(__name__)
+
+# Константы
+SECONDS_IN_HOUR = 3600
+SECONDS_IN_MINUTE = 60
+SCHEDULER_RESTART_DELAY_SECONDS = 300  # 5 минут
+DISCORD_MESSAGE_MAX_LENGTH = 2000
+MAX_FILES_PER_MESSAGE = 10
+SLEEP_DELAY_BETWEEN_MESSAGES = 0.5
 
 
 class DiscordBot(discord.Client):
@@ -47,29 +54,11 @@ class DiscordBot(discord.Client):
         self._end_time: time = time(12, 0, 0)       # Конец временного окна (12:00:00)
         
         current_datetime: datetime = datetime.now(self.moscow_tz)
-        start_datetime: datetime = current_datetime.replace(
-            hour=self._start_time.hour,
-            minute=self._start_time.minute,
-            second=self._start_time.second,
-            microsecond=0  # Обнуляем микросекунды для точности
-        )
-        end_datetime: datetime = current_datetime.replace(
-                    hour=self._end_time.hour,
-                    minute=self._end_time.minute,
-                    second=self._end_time.second,
-                    microsecond=0  # Обнуляем микросекунды для точности
-                )
+        start_datetime, end_datetime = self._create_time_range_for_date(current_datetime)
         _start_datetime = current_datetime if start_datetime <= current_datetime <= end_datetime else start_datetime
         
         # Генерируем случайное время отправки в заданном диапазоне
-        self._next_target_time: time = self.get_random_time_in_range(
-            start_time=time(
-                _start_datetime.hour,
-                _start_datetime.minute,
-                _start_datetime.second + 3
-            ),
-            end_time=self._end_time
-        )
+        self._next_target_time: time = self._initialize_next_target_time(_start_datetime)
 
     @property
     def wait_until_target_day(self) -> int | None:
@@ -77,7 +66,7 @@ class DiscordBot(discord.Client):
         return self._wait_until_target_day
     
     @wait_until_target_day.setter
-    def set_day(self, value: int | None) -> None:
+    def wait_until_target_day(self, value: int | None) -> None:
         """Установить день, до которого бот будет ждать."""
         if not isinstance(value, int | None):
             raise TypeError("День должен быть целым числом или None!")
@@ -102,7 +91,7 @@ class DiscordBot(discord.Client):
         return self._chat_channel_message
     
     @chat_channel_message.setter
-    def set_chat_message(self, message: str) -> None:
+    def chat_channel_message(self, message: str) -> None:
         """Установить сообщение, которое отправляется при автоотправке."""
         self._chat_channel_message = message
 
@@ -144,6 +133,49 @@ class DiscordBot(discord.Client):
                 return next_time.strftime('%H:%M:%S - %d.%m.%Y')
         
         return "Не определено"
+
+    def _create_time_range_for_date(self, date_time: datetime) -> tuple[datetime, datetime]:
+        """
+        Создает диапазон времени для заданной даты на основе start_time и end_time
+        
+        Args:
+            date_time: Дата и время для которых создается диапазон
+            
+        Returns:
+            tuple: (start_datetime, end_datetime)
+        """
+        start_datetime = date_time.replace(
+            hour=self._start_time.hour,
+            minute=self._start_time.minute,
+            second=self._start_time.second,
+            microsecond=0
+        )
+        end_datetime = date_time.replace(
+            hour=self._end_time.hour,
+            minute=self._end_time.minute,
+            second=self._end_time.second,
+            microsecond=0
+        )
+        return start_datetime, end_datetime
+
+    def _initialize_next_target_time(self, start_datetime: datetime) -> time:
+        """
+        Инициализирует следующее целевое время для отправки сообщений
+        
+        Args:
+            start_datetime: Время начала диапазона
+            
+        Returns:
+            time: Случайное время в заданном диапазоне
+        """
+        return self.get_random_time_in_range(
+            start_time=time(
+                start_datetime.hour,
+                start_datetime.minute,
+                start_datetime.second + 3
+            ),
+            end_time=self._end_time
+        )
 
     async def on_ready(self) -> None:
         """
@@ -196,24 +228,14 @@ class DiscordBot(discord.Client):
             _log.info("Сообщение успешно отправлено в канал '%s'", channel_name)
             return True
             
-        except discord.Forbidden:
-            # Ошибка прав доступа - у бота нет разрешения на отправку сообщений
-            _log.error("Отсутствуют права для отправки сообщений в канал %s", channel_id)
-            return False
-        except discord.HTTPException as e:
-            # Ошибки API Discord (лимиты, проблемы с сетью и т.д.)
-            _log.error("HTTP ошибка при отправке сообщения в канал %s: %s", channel_id, e)
-            return False
-        except Exception as e:
-            # Любые другие непредвиденные ошибки
-            _log.exception("Неожиданная ошибка при отправке сообщения в канал %s: %s", channel_id, e)
-            return False
+        except (discord.Forbidden, discord.HTTPException, Exception) as e:
+            return self._handle_message_send_error(e, channel_id, "")
     
     async def send_message_with_files_to_channel(
         self, 
         channel_id: int, 
         message_content: str, 
-        file_paths: List[str]
+        file_paths: list[str]
     ) -> bool:
         """
         Отправляет сообщение с файлами в указанный канал
@@ -227,7 +249,7 @@ class DiscordBot(discord.Client):
             bool: True если сообщение отправлено успешно
         """
         try:
-            channel: discord.abc.Messageable | None = self.get_channel(channel_id)
+            channel: discord.abc.Messageable | None = self.get_channel(channel_id) # type: ignore
             
             if channel is None:
                 _log.error("Канал с ID %s не найден", channel_id)
@@ -236,8 +258,8 @@ class DiscordBot(discord.Client):
             # Разбиваем текст на части если он слишком длинный
             text_parts = self._split_long_text(message_content)
             
-            # Разбиваем файлы на группы по 10
-            file_groups = self._split_files(file_paths, 10)
+            # Разбиваем файлы на группы
+            file_groups = self._split_files(file_paths, MAX_FILES_PER_MESSAGE)
             
             # Отправляем первую часть текста с первой группой файлов
             if file_groups:
@@ -247,7 +269,7 @@ class DiscordBot(discord.Client):
                 # Отправляем остальные группы файлов
                 for file_group in file_groups[1:]:
                     files = [discord.File(file_path) for file_path in file_group if Path(file_path).exists()]
-                    await asyncio.sleep(0.5)  # Задержка между сообщениями
+                    await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)  # Задержка между сообщениями
                     await channel.send(files=files)
             else:
                 # Если нет файлов, отправляем только текст
@@ -255,25 +277,37 @@ class DiscordBot(discord.Client):
             
             # Отправляем остальные части текста
             for text_part in text_parts[1:]:
-                await asyncio.sleep(0.5)  # Задержка между сообщениями
+                await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)  # Задержка между сообщениями
                 await channel.send(content=text_part)
             
             return True
             
-        except discord.Forbidden:
-            _log.error("Нет разрешения на отправку сообщений в канал %s", channel_id)
-            return False
-        except discord.NotFound:
-            _log.error("Канал %s не найден", channel_id)
-            return False
-        except discord.HTTPException as e:
-            _log.error("HTTP ошибка при отправке сообщения с файлами в канал %s: %s", channel_id, e)
-            return False
-        except Exception as e:
-            _log.exception("Неожиданная ошибка при отправке сообщения с файлами в канал %s: %s", channel_id, e)
-            return False
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException, Exception) as e:
+            return self._handle_message_send_error(e, channel_id, "с файлами")
     
-    def _split_long_text(self, text: str, max_length: int = 2000) -> List[str]:
+    def _handle_message_send_error(self, error: Exception, channel_id: int, error_type: str) -> bool:
+        """
+        Централизованная обработка ошибок при отправке сообщений
+        
+        Args:
+            error: Исключение которое произошло
+            channel_id: ID канала в котором произошла ошибка
+            error_type: Тип ошибки для логирования
+            
+        Returns:
+            bool: Всегда False, так как произошла ошибка
+        """
+        if isinstance(error, discord.Forbidden):
+            _log.error("Отсутствуют права для отправки сообщений %s в канал %s", error_type, channel_id)
+        elif isinstance(error, discord.NotFound):
+            _log.error("Канал %s не найден", channel_id)
+        elif isinstance(error, discord.HTTPException):
+            _log.error("HTTP ошибка при отправке сообщения %s в канал %s: %s", error_type, channel_id, error)
+        else:
+            _log.exception("Неожиданная ошибка при отправке сообщения %s в канал %s: %s", error_type, channel_id, error)
+        return False
+    
+    def _split_long_text(self, text: str, max_length: int = DISCORD_MESSAGE_MAX_LENGTH) -> list[str]:
         """Разбивка длинного текста на части для Discord"""
         if len(text) <= max_length:
             return [text]
@@ -315,7 +349,7 @@ class DiscordBot(discord.Client):
         
         return parts if parts else [text[:max_length]]
     
-    def _split_files(self, file_paths: List[str], max_per_message: int = 10) -> List[List[str]]:
+    def _split_files(self, file_paths: list[str], max_per_message: int = MAX_FILES_PER_MESSAGE) -> list[list[str]]:
         """Разбивка файлов на группы для отправки несколькими сообщениями"""
         if len(file_paths) <= max_per_message:
             return [file_paths] if file_paths else []
@@ -340,20 +374,20 @@ class DiscordBot(discord.Client):
         """
         # Конвертируем время в количество секунд с начала дня
         # Это позволяет легко работать с диапазонами времени
-        start_seconds: int = (start_time.hour * 3600 + 
-                             start_time.minute * 60 + 
+        start_seconds: int = (start_time.hour * SECONDS_IN_HOUR + 
+                             start_time.minute * SECONDS_IN_MINUTE + 
                              start_time.second)
-        end_seconds: int = (end_time.hour * 3600 + 
-                           end_time.minute * 60 + 
+        end_seconds: int = (end_time.hour * SECONDS_IN_HOUR + 
+                           end_time.minute * SECONDS_IN_MINUTE + 
                            end_time.second)
         
         # Генерируем случайное количество секунд в заданном диапазоне
         random_seconds: int = random.randint(start_seconds, end_seconds)
         
         # Конвертируем секунды обратно в часы, минуты и секунды
-        hours: int = random_seconds // 3600
-        minutes: int = (random_seconds % 3600) // 60
-        seconds: int = random_seconds % 60
+        hours: int = random_seconds // SECONDS_IN_HOUR
+        minutes: int = (random_seconds % SECONDS_IN_HOUR) // SECONDS_IN_MINUTE
+        seconds: int = random_seconds % SECONDS_IN_MINUTE
         
         generated_time = time(hours, minutes, seconds)
         _log.debug("Сгенерировано случайное время: %s", generated_time.strftime('%H:%M:%S'))
@@ -435,9 +469,9 @@ class DiscordBot(discord.Client):
         wait_seconds: float = time_difference.total_seconds()
         
         # Форматируем время ожидания для удобного отображения
-        hours_to_wait = int(wait_seconds // 3600)
-        minutes_to_wait = int((wait_seconds % 3600) // 60)
-        seconds_to_wait = int(wait_seconds % 60)
+        hours_to_wait = int(wait_seconds // SECONDS_IN_HOUR)
+        minutes_to_wait = int((wait_seconds % SECONDS_IN_HOUR) // SECONDS_IN_MINUTE)
+        seconds_to_wait = int(wait_seconds % SECONDS_IN_MINUTE)
         
         _log.info("Время ожидания: %dч %dм %dс", 
                     hours_to_wait, minutes_to_wait, seconds_to_wait)
@@ -464,92 +498,13 @@ class DiscordBot(discord.Client):
                 moscow_now: datetime = datetime.now(self.moscow_tz)
                 _log.debug("Текущее время в Москве: %s", moscow_now.strftime('%Y-%m-%d %H:%M:%S'))
                 
-                start_datetime: datetime = moscow_now.replace(
-                    hour=self._start_time.hour,
-                    minute=self._start_time.minute,
-                    second=self._start_time.second,
-                    microsecond=0  # Обнуляем микросекунды для точности
-                )
-                end_datetime: datetime = moscow_now.replace(
-                    hour=self._end_time.hour,
-                    minute=self._end_time.minute,
-                    second=self._end_time.second,
-                    microsecond=0  # Обнуляем микросекунды для точности
-                )
+                start_datetime, end_datetime = self._create_time_range_for_date(moscow_now)
                 
                 if self._wait_until_target_day is not None:
-                    target_date = self._calculate_wait_until_target_date(moscow_now)
-        
-                    self._wait_until_target_day = None
-                    await self.wait_until_next_date(target_date)
-                    # Чтобы обновить все текущие даты
+                    await self._handle_wait_until_target_day(moscow_now)
                     continue
                 
-                # Проверяем, является ли сегодня рабочим днем
-                if self.is_weekday(moscow_now):
-                    # Проверяем, что сейчас время в диапазоне
-                    if start_datetime <= moscow_now <= end_datetime: 
-                        # Создаем полную дату и время для отправки
-                        target_datetime: datetime = moscow_now.replace(
-                            hour=self._next_target_time.hour,
-                            minute=self._next_target_time.minute,
-                            second=self._next_target_time.second,
-                            microsecond=0  # Обнуляем микросекунды для точности
-                        )
-                        
-                        # Генерируем случайное время отправки в заданном диапазоне для отправки в следующий раз
-                        self._next_target_time: time = self.get_random_time_in_range(
-                            start_time=time(
-                                start_datetime.hour,
-                                start_datetime.minute,
-                                start_datetime.second + 3
-                            ),
-                            end_time=self._end_time
-                        )
-                        
-                        # Проверяем, не прошло ли уже запланированное время сегодня
-                        if target_datetime > moscow_now:
-                            _log.info("Следующее сообщение запланировано на %s МСК", 
-                                    target_datetime.strftime('%d.%m.%Y в %H:%M:%S'))
-                            await self.wait_until_next_date(target_datetime)
-                            
-                            # Получаем точное время отправки для сообщения
-                            current_moscow_time: datetime = datetime.now(self.moscow_tz)
-                            
-                            if self._is_mark_enabled:
-                                _log.info("Отправка запланированного сообщения...")
-                                
-                                # Отправляем сообщение
-                                success: bool = await self.send_message_to_channel(
-                                    channel_id=self._chat_channel_id,
-                                    message_content=self._chat_channel_message
-                                )
-                                self._was_sent_today = True
-                                
-                                if success:
-                                    _log.info("Автоматическое сообщение успешно отправлено в %s МСК", 
-                                            current_moscow_time.strftime('%H:%M:%S'))
-                                else:
-                                    _log.error("Не удалось отправить запланированное сообщение")
-                            else:
-                                _log.info("Отправка отметок в чат отключена.")
-                        
-                        else:
-                            # Если время уже прошло, выводим информацию
-                            _log.info("Запланированное время (%s) уже прошло сегодня, ожидание следующего дня", 
-                                    self._next_target_time.strftime('%H:%M:%S'))
-                else:
-                    # Сегодня выходной день
-                    weekday_names: list[str] = [
-                        'Понедельник', 'Вторник', 'Среда', 'Четверг', 
-                        'Пятница', 'Суббота', 'Воскресенье'
-                    ]
-                    today_name: str = weekday_names[moscow_now.weekday()]
-                    _log.info("Сегодня %s (выходной день), автоматические сообщения не отправляются", 
-                             today_name)
-                
-                # Ждем до следующего диапазона
-                await self.wait_until_next_date(start_datetime)
+                await self._process_daily_schedule(moscow_now, start_datetime, end_datetime)
                 
             except asyncio.CancelledError:
                 # Обработка отмены задачи (например, при выключении бота)
@@ -560,7 +515,126 @@ class DiscordBot(discord.Client):
                 # Обработка любых других ошибок в планировщике
                 _log.exception("Критическая ошибка в планировщике сообщений: %s", e)
                 _log.info("Попытка перезапуска планировщика через 5 минут...")
-                await asyncio.sleep(300)  # 300 секунд = 5 минут
+                await asyncio.sleep(SCHEDULER_RESTART_DELAY_SECONDS)
+
+    async def _handle_wait_until_target_day(self, moscow_now: datetime) -> None:
+        """
+        Обрабатывает ожидание до целевого дня
+        
+        Args:
+            moscow_now: Текущее время в московском часовом поясе
+        """
+        target_date = self._calculate_wait_until_target_date(moscow_now)
+        self._wait_until_target_day = None
+        await self.wait_until_next_date(target_date)
+
+    async def _process_daily_schedule(self, moscow_now: datetime, start_datetime: datetime, end_datetime: datetime) -> None:
+        """
+        Обрабатывает ежедневное планирование сообщений
+        
+        Args:
+            moscow_now: Текущее время в московском часовом поясе
+            start_datetime: Время начала диапазона отправки
+            end_datetime: Время окончания диапазона отправки
+        """
+        if self.is_weekday(moscow_now):
+            if start_datetime <= moscow_now <= end_datetime: 
+                await self._handle_workday_message_sending(moscow_now, start_datetime)
+        else:
+            self._log_weekend_message(moscow_now)
+        
+        # Ждем до начала следующего рабочего дня
+        await self._wait_until_next_working_day(start_datetime)
+
+    async def _handle_workday_message_sending(self, moscow_now: datetime, start_datetime: datetime) -> None:
+        """
+        Обрабатывает отправку сообщений в рабочие дни
+        
+        Args:
+            moscow_now: Текущее время в московском часовом поясе
+            start_datetime: Время начала диапазона отправки
+        """
+        # Создаем полную дату и время для отправки
+        target_datetime = moscow_now.replace(
+            hour=self._next_target_time.hour,
+            minute=self._next_target_time.minute,
+            second=self._next_target_time.second,
+            microsecond=0
+        )
+        
+        # Генерируем случайное время для следующей отправки
+        self._next_target_time = self._initialize_next_target_time(start_datetime)
+        
+        # Проверяем, не прошло ли уже запланированное время
+        if target_datetime > moscow_now:
+            await self._wait_and_send_message(target_datetime)
+        else:
+            _log.info("Запланированное время (%s) уже прошло сегодня, ожидание следующего дня", 
+                     self._next_target_time.strftime('%H:%M:%S'))
+
+    async def _wait_and_send_message(self, target_datetime: datetime) -> None:
+        """
+        Ожидает до целевого времени и отправляет сообщение
+        
+        Args:
+            target_datetime: Время когда нужно отправить сообщение
+        """
+        _log.info("Следующее сообщение запланировано на %s МСК", 
+                 target_datetime.strftime('%d.%m.%Y в %H:%M:%S'))
+        await self.wait_until_next_date(target_datetime)
+        
+        current_moscow_time = datetime.now(self.moscow_tz)
+        
+        if self._is_mark_enabled:
+            _log.info("Отправка запланированного сообщения...")
+            
+            success = await self.send_message_to_channel(
+                channel_id=self._chat_channel_id,
+                message_content=self._chat_channel_message
+            )
+            self._was_sent_today = True
+            
+            if success:
+                _log.info("Автоматическое сообщение успешно отправлено в %s МСК", 
+                         current_moscow_time.strftime('%H:%M:%S'))
+            else:
+                _log.error("Не удалось отправить запланированное сообщение")
+        else:
+            _log.info("Отправка отметок в чат отключена.")
+
+    def _log_weekend_message(self, moscow_now: datetime) -> None:
+        """
+        Логирует сообщение о выходном дне
+        
+        Args:
+            moscow_now: Текущее время в московском часовом поясе
+        """
+        weekday_names = [
+            'Понедельник', 'Вторник', 'Среда', 'Четверг', 
+            'Пятница', 'Суббота', 'Воскресенье'
+        ]
+        today_name = weekday_names[moscow_now.weekday()]
+        _log.info("Сегодня %s (выходной день), автоматические сообщения не отправляются", 
+                 today_name)
+
+    async def _wait_until_next_working_day(self, start_datetime: datetime) -> None:
+        """
+        Ожидает до следующего рабочего дня
+        
+        Args:
+            start_datetime: Начальное время в московском часовом поясе
+        """
+        current_date = start_datetime.date()
+        
+        # Ищем следующий рабочий день
+        for days_ahead in range(1, 8):  # Максимум неделя вперед
+            check_date = current_date + timedelta(days=days_ahead)
+            check_datetime = datetime.combine(check_date, self._start_time, self.moscow_tz)
+            
+            if self.is_weekday(check_datetime):
+                _log.debug("Следующий рабочий день: %s", check_datetime.strftime('%Y-%m-%d %H:%M:%S'))
+                await self.wait_until_next_date(check_datetime)
+                return
 
 
 # Главная функция запуска бота

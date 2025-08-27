@@ -564,7 +564,7 @@ class TelegramBotController:
             return
             
         new_text = message.text.strip()
-        self.discord_bot.set_chat_message = new_text
+        self.discord_bot.chat_channel_message = new_text
         
         await state.clear()
         await message.answer(
@@ -627,7 +627,7 @@ class TelegramBotController:
                 )
                 return
             
-            self.discord_bot.set_day = day
+            self.discord_bot.wait_until_target_day = day
             await state.clear()
             
             await message.answer(
@@ -649,7 +649,7 @@ class TelegramBotController:
             await callback.answer("❌ Доступ запрещен")
             return
             
-        self.discord_bot.set_day = None
+        self.discord_bot.wait_until_target_day = None
         
         await callback.message.edit_text(
             f"✅ *Автоотметка возобновлена!*\n\n"
