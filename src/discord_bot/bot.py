@@ -5,6 +5,8 @@ import logging
 import asyncio
 import discord
 import calendar
+from pathlib import Path
+from typing import List, Optional
 from datetime import datetime, time, timedelta
 
 from utils import load_env_config
@@ -206,6 +208,123 @@ class DiscordBot(discord.Client):
             # Любые другие непредвиденные ошибки
             _log.exception("Неожиданная ошибка при отправке сообщения в канал %s: %s", channel_id, e)
             return False
+    
+    async def send_message_with_files_to_channel(
+        self, 
+        channel_id: int, 
+        message_content: str, 
+        file_paths: List[str]
+    ) -> bool:
+        """
+        Отправляет сообщение с файлами в указанный канал
+        
+        Args:
+            channel_id: ID канала Discord
+            message_content: Текст сообщения
+            file_paths: Список путей к файлам для отправки
+            
+        Returns:
+            bool: True если сообщение отправлено успешно
+        """
+        try:
+            channel: discord.abc.Messageable | None = self.get_channel(channel_id)
+            
+            if channel is None:
+                _log.error("Канал с ID %s не найден", channel_id)
+                return False
+            
+            # Разбиваем текст на части если он слишком длинный
+            text_parts = self._split_long_text(message_content)
+            
+            # Разбиваем файлы на группы по 10
+            file_groups = self._split_files(file_paths, 10)
+            
+            # Отправляем первую часть текста с первой группой файлов
+            if file_groups:
+                files = [discord.File(file_path) for file_path in file_groups[0] if Path(file_path).exists()]
+                await channel.send(content=text_parts[0] if text_parts else "", files=files)
+                
+                # Отправляем остальные группы файлов
+                for file_group in file_groups[1:]:
+                    files = [discord.File(file_path) for file_path in file_group if Path(file_path).exists()]
+                    await asyncio.sleep(0.5)  # Задержка между сообщениями
+                    await channel.send(files=files)
+            else:
+                # Если нет файлов, отправляем только текст
+                await channel.send(content=text_parts[0] if text_parts else "")
+            
+            # Отправляем остальные части текста
+            for text_part in text_parts[1:]:
+                await asyncio.sleep(0.5)  # Задержка между сообщениями
+                await channel.send(content=text_part)
+            
+            return True
+            
+        except discord.Forbidden:
+            _log.error("Нет разрешения на отправку сообщений в канал %s", channel_id)
+            return False
+        except discord.NotFound:
+            _log.error("Канал %s не найден", channel_id)
+            return False
+        except discord.HTTPException as e:
+            _log.error("HTTP ошибка при отправке сообщения с файлами в канал %s: %s", channel_id, e)
+            return False
+        except Exception as e:
+            _log.exception("Неожиданная ошибка при отправке сообщения с файлами в канал %s: %s", channel_id, e)
+            return False
+    
+    def _split_long_text(self, text: str, max_length: int = 2000) -> List[str]:
+        """Разбивка длинного текста на части для Discord"""
+        if len(text) <= max_length:
+            return [text]
+        
+        parts = []
+        current_part = ""
+        
+        lines = text.split('\n')
+        
+        for line in lines:
+            if len(line) > max_length:
+                if current_part:
+                    parts.append(current_part.rstrip())
+                    current_part = ""
+                
+                words = line.split(' ')
+                temp_line = ""
+                
+                for word in words:
+                    if len(temp_line + word + " ") <= max_length:
+                        temp_line += word + " "
+                    else:
+                        if temp_line:
+                            parts.append(temp_line.rstrip())
+                        temp_line = word + " "
+                
+                if temp_line:
+                    current_part = temp_line
+            else:
+                if len(current_part + line + "\n") <= max_length:
+                    current_part += line + "\n"
+                else:
+                    if current_part:
+                        parts.append(current_part.rstrip())
+                    current_part = line + "\n"
+        
+        if current_part:
+            parts.append(current_part.rstrip())
+        
+        return parts if parts else [text[:max_length]]
+    
+    def _split_files(self, file_paths: List[str], max_per_message: int = 10) -> List[List[str]]:
+        """Разбивка файлов на группы для отправки несколькими сообщениями"""
+        if len(file_paths) <= max_per_message:
+            return [file_paths] if file_paths else []
+        
+        groups = []
+        for i in range(0, len(file_paths), max_per_message):
+            groups.append(file_paths[i:i + max_per_message])
+        
+        return groups
 
     def get_random_time_in_range(self, start_time: time, end_time: time) -> time:
         """
