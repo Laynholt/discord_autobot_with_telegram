@@ -18,6 +18,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 
 from discord_bot import DiscordBot
 
@@ -387,6 +388,7 @@ class TelegramBotController:
         
         # Автоотметка
         self.dp.callback_query(F.data == "toggle_auto_mark")(self.toggle_auto_mark_callback)
+        self.dp.callback_query(F.data == "regenerate_time")(self.regenerate_time_callback)
         
         # Настройки сообщения
         self.dp.callback_query(F.data == "set_message_text")(self.set_message_text_callback)
@@ -482,6 +484,8 @@ class TelegramBotController:
         
         builder = InlineKeyboardBuilder()
         builder.row(InlineKeyboardButton(text="🔄 Переключить", callback_data="toggle_auto_mark"))
+        if self.discord_bot.should_send_mark_message:
+            builder.row(InlineKeyboardButton(text="🎲 Перегенерировать время", callback_data="regenerate_time"))
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu"))
         
         await callback.message.edit_text(
@@ -521,6 +525,48 @@ class TelegramBotController:
         )
         await callback.answer(f"Автоотметка {action}!")
         _log.info(f"Автоотметка {action} пользователем {callback.from_user.id}")
+    
+    async def regenerate_time_callback(self, callback: types.CallbackQuery):
+        """Перегенерация времени отправки"""
+        if not self.check_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        
+        # Сохраняем старое время для уведомления
+        old_time = self.discord_bot.get_target_time_raw().strftime('%H:%M:%S')
+        
+        # Перегенерируем время
+        self.discord_bot.regenerate_next_target_time()
+        
+        # Получаем новое время
+        status = "✅ Включена" if self.discord_bot.should_send_mark_message else "❌ Отключена"
+        next_send_time = self.discord_bot.next_target_time
+        
+        # Обновляем кнопки
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="🔄 Переключить", callback_data="toggle_auto_mark"))
+        if self.discord_bot.should_send_mark_message:
+            builder.row(InlineKeyboardButton(text="🎲 Перегенерировать время", callback_data="regenerate_time"))
+        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu"))
+
+        try:
+            await callback.message.edit_text(
+                f"🔔 *Ежедневная автоотметка*\n\n"
+                f"Автоматическая отправка сообщений в рабочие дни (пн-пт) с 10:30 до 12:00 МСК\n\n"
+                f"Текущий статус: _{status}_\n"
+                f"Следующая отправка: _{next_send_time}_\n\n"
+                f"🎲 *Время перегенерировано!*",
+                reply_markup=builder.as_markup(),
+                parse_mode="Markdown"
+            )
+            await callback.answer("🎲 Время отправки перегенерировано!")
+            _log.info(f"Время отправки перегенерировано пользователем {callback.from_user.id}: {old_time} → {next_send_time}")
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                await callback.answer("🎲 Время перегенерировано, но отображение не изменилось")
+                _log.info(f"Время отправки перегенерировано пользователем {callback.from_user.id}: {old_time} → {next_send_time} (сообщение не обновлено)")
+            else:
+                raise e
     
     # === НАСТРОЙКИ СООБЩЕНИЯ ===
     

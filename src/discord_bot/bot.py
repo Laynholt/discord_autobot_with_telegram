@@ -20,6 +20,13 @@ DISCORD_MESSAGE_MAX_LENGTH = 2000
 MAX_FILES_PER_MESSAGE = 10
 SLEEP_DELAY_BETWEEN_MESSAGES = 0.5
 
+# Настройки автоотправки
+DEFAULT_CHAT_MESSAGE = "+"
+WORK_DAY_START_HOUR = 10
+WORK_DAY_START_MINUTE = 30
+WORK_DAY_END_HOUR = 12
+WORK_DAY_END_MINUTE = 0
+WORK_DAY_END_SECOND_SHIFT = 3
 
 class DiscordBot(discord.Client):
     """
@@ -48,17 +55,14 @@ class DiscordBot(discord.Client):
         self._is_mark_enabled: bool = True
         self._wait_until_target_day: int | None = None
         
-        self._chat_channel_message: str = "+"
+        self._chat_channel_message: str = DEFAULT_CHAT_MESSAGE
         
-        self._start_time: time = time(10, 30, 0)    # Начало временного окна (10:30:00)
-        self._end_time: time = time(12, 0, 0)       # Конец временного окна (12:00:00)
+        self._start_time: time = time(WORK_DAY_START_HOUR, WORK_DAY_START_MINUTE, 0)    # Начало временного окна
+        self._end_time: time = time(WORK_DAY_END_HOUR, WORK_DAY_END_MINUTE, 0)       # Конец временного окна
         
-        current_datetime: datetime = datetime.now(self.moscow_tz)
-        start_datetime, end_datetime = self._create_time_range_for_date(current_datetime)
-        _start_datetime = current_datetime if start_datetime <= current_datetime <= end_datetime else start_datetime
-        
-        # Генерируем случайное время отправки в заданном диапазоне
-        self._next_target_time: time = self._initialize_next_target_time(_start_datetime)
+        self._next_target_time: time | None = None
+        self._next_target_time_locked: time | None = None
+        self.regenerate_next_target_time()
 
     @property
     def wait_until_target_day(self) -> int | None:
@@ -172,10 +176,50 @@ class DiscordBot(discord.Client):
             start_time=time(
                 start_datetime.hour,
                 start_datetime.minute,
-                start_datetime.second + 3
+                start_datetime.second
             ),
             end_time=self._end_time
         )
+        
+    def regenerate_next_target_time(self) -> None:
+        """
+        Перегенерирует случайное время для следующей отправки сообщения.
+        Используется для повторной генерации времени по требованию пользователя.
+        """
+        current_datetime: datetime = datetime.now(self.moscow_tz)
+        start_datetime, end_datetime = self._create_time_range_for_date(
+            current_datetime
+        )
+        
+        # Если время еще не установлено (первоначальная генерация)
+        if self._next_target_time is None:
+            # Если мы в рабочем диапазоне, начинаем с текущего времени, иначе с начала диапазона
+            _start_datetime = (
+                current_datetime
+                if start_datetime <= current_datetime <= end_datetime
+                else start_datetime
+            )
+        else:
+            # Если время уже установлено, генерируем новое время начиная с установленного момента
+            # до конца рабочего диапазона
+            _start_datetime = current_datetime.replace(
+                hour=self._next_target_time_locked.hour,
+                minute=self._next_target_time_locked.minute,
+                second=self._next_target_time_locked.second,
+                microsecond=0,
+            )
+        
+        # Генерируем новое случайное время
+        self._next_target_time = self._initialize_next_target_time(_start_datetime)
+
+    def get_target_time_raw(self) -> time:
+        """
+        Возвращает текущее запланированное время отправки как объект time
+        
+        Returns:
+            time: Время отправки
+        """
+        return self._next_target_time
 
     async def on_ready(self) -> None:
         """
@@ -381,8 +425,13 @@ class DiscordBot(discord.Client):
                            end_time.minute * SECONDS_IN_MINUTE + 
                            end_time.second)
         
-        # Генерируем случайное количество секунд в заданном диапазоне
-        random_seconds: int = random.randint(start_seconds, end_seconds)
+        # Если начально время совпадает с конечным или больше его, то возвращаем конечное
+        if start_seconds >= end_seconds:
+            random_seconds = end_seconds        
+        else:
+            # Генерируем случайное количество секунд в заданном диапазоне
+            # Сдвигаем на 3 секунды для надежности
+            random_seconds: int = random.randint(start_seconds + WORK_DAY_END_SECOND_SHIFT, end_seconds)
         
         # Конвертируем секунды обратно в часы, минуты и секунды
         hours: int = random_seconds // SECONDS_IN_HOUR
@@ -537,52 +586,55 @@ class DiscordBot(discord.Client):
             start_datetime: Время начала диапазона отправки
             end_datetime: Время окончания диапазона отправки
         """
+        self._next_target_time_locked = self._next_target_time
+        
         if self.is_weekday(moscow_now):
             if start_datetime <= moscow_now <= end_datetime: 
-                await self._handle_workday_message_sending(moscow_now, start_datetime)
+                await self._handle_workday_message_sending(start_datetime)
         else:
             self._log_weekend_message(moscow_now)
         
         # Ждем до начала следующего рабочего дня
-        await self._wait_until_next_working_day(start_datetime)
+        await self._wait_until_next_working_day(moscow_now)
 
-    async def _handle_workday_message_sending(self, moscow_now: datetime, start_datetime: datetime) -> None:
+    async def _handle_workday_message_sending(self, start_datetime: datetime) -> None:
         """
-        Обрабатывает отправку сообщений в рабочие дни
+        Обрабатывает отправку сообщений в рабочие дни с возможностью повторной генерации времени
         
         Args:
-            moscow_now: Текущее время в московском часовом поясе
             start_datetime: Время начала диапазона отправки
         """
-        # Создаем полную дату и время для отправки
-        target_datetime = moscow_now.replace(
-            hour=self._next_target_time.hour,
-            minute=self._next_target_time.minute,
-            second=self._next_target_time.second,
-            microsecond=0
-        )
+        while True:
+            current_moscow_time = datetime.now(self.moscow_tz)
+            
+            # Создаем целевое время для отправки
+            target_datetime = current_moscow_time.replace(
+                hour=self._next_target_time.hour,
+                minute=self._next_target_time.minute,
+                second=self._next_target_time.second,
+                microsecond=0
+            )
+            
+            # Проверяем, дождались ли мы нашего времени
+            if target_datetime <= current_moscow_time:
+                break
+            
+            self._next_target_time_locked = self._next_target_time
+            # Время корректное, ждем и отправляем
+            _log.info("Следующее сообщение запланировано на %s МСК", 
+                     target_datetime.strftime('%d.%m.%Y в %H:%M:%S'))
+            await self.wait_until_next_date(target_datetime)
         
-        # Генерируем случайное время для следующей отправки
+        # Отправляем сообщение
+        await self._send_scheduled_message()
+        
+        # Генерируем время для следующего дня и выходим
         self._next_target_time = self._initialize_next_target_time(start_datetime)
-        
-        # Проверяем, не прошло ли уже запланированное время
-        if target_datetime > moscow_now:
-            await self._wait_and_send_message(target_datetime)
-        else:
-            _log.info("Запланированное время (%s) уже прошло сегодня, ожидание следующего дня", 
-                     self._next_target_time.strftime('%H:%M:%S'))
 
-    async def _wait_and_send_message(self, target_datetime: datetime) -> None:
+    async def _send_scheduled_message(self) -> None:
         """
-        Ожидает до целевого времени и отправляет сообщение
-        
-        Args:
-            target_datetime: Время когда нужно отправить сообщение
+        Отправляет запланированное сообщение
         """
-        _log.info("Следующее сообщение запланировано на %s МСК", 
-                 target_datetime.strftime('%d.%m.%Y в %H:%M:%S'))
-        await self.wait_until_next_date(target_datetime)
-        
         current_moscow_time = datetime.now(self.moscow_tz)
         
         if self._is_mark_enabled:
@@ -617,21 +669,27 @@ class DiscordBot(discord.Client):
         _log.info("Сегодня %s (выходной день), автоматические сообщения не отправляются", 
                  today_name)
 
-    async def _wait_until_next_working_day(self, start_datetime: datetime) -> None:
+    async def _wait_until_next_working_day(self, moscow_now: datetime) -> None:
         """
         Ожидает до следующего рабочего дня
         
         Args:
-            start_datetime: Начальное время в московском часовом поясе
+            moscow_now: Текущее время в московском часовом поясе
         """
-        current_date = start_datetime.date()
+        current_date = moscow_now.date()
         
         # Ищем следующий рабочий день
-        for days_ahead in range(1, 8):  # Максимум неделя вперед
+        for days_ahead in range(8):  # Максимум неделя вперед
             check_date = current_date + timedelta(days=days_ahead)
             check_datetime = datetime.combine(check_date, self._start_time, self.moscow_tz)
             
             if self.is_weekday(check_datetime):
+                # Если это сегодня
+                if days_ahead == 0:
+                    # Проверяем, не прошло ли уже время отправки
+                    if moscow_now.time() > self._start_time:
+                        continue  # Переходим к следующему дню
+                
                 _log.debug("Следующий рабочий день: %s", check_datetime.strftime('%Y-%m-%d %H:%M:%S'))
                 await self.wait_until_next_date(check_datetime)
                 return
