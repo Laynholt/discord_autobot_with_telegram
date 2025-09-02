@@ -586,7 +586,7 @@ class DiscordBot(discord.Client):
             start_datetime: Время начала диапазона отправки
             end_datetime: Время окончания диапазона отправки
         """
-        self._next_target_time_locked = self._next_target_time
+        self._next_target_time_locked = self._start_time
         
         if self.is_weekday(moscow_now):
             if start_datetime <= moscow_now <= end_datetime: 
