@@ -246,6 +246,15 @@ class DiscordBot(discord.Client):
         """Обработчик подключения к Discord"""
         _log.info("Discord бот подключается к серверу...")
     
+    async def _reconnect_if_needed(self) -> None:
+        """Переподключение к Discord при необходимости"""
+        try:
+            if self.is_closed():
+                _log.info("Попытка переподключения к Discord...")
+                await self.connect(reconnect=True)
+        except Exception as e:
+            _log.error("Ошибка при переподключении: %s", e)
+    
     async def send_message_to_channel(self, channel_id: int, message_content: str) -> bool:
         """
         Отправляет сообщение в указанный канал по его ID
@@ -257,23 +266,42 @@ class DiscordBot(discord.Client):
         Returns:
             bool: True если сообщение отправлено успешно, False в случае ошибки
         """
-        try:
-            # Получаем объект канала по его ID
-            channel: discord.abc.Messageable | None = self.get_channel(channel_id) # type: ignore
-            
-            # Проверяем, что канал найден
-            if channel is None:
-                _log.error("Канал с ID %s не найден", channel_id)
-                return False
-            
-            # Отправляем сообщение в канал
-            await channel.send(message_content)
-            channel_name = getattr(channel, 'name', f'ID:{channel_id}')
-            _log.info("Сообщение успешно отправлено в канал '%s'", channel_name)
-            return True
-            
-        except (discord.Forbidden, discord.HTTPException, Exception) as e:
-            return self._handle_message_send_error(e, channel_id, "")
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                # Проверяем состояние подключения
+                if self.is_closed():
+                    _log.warning("Соединение закрыто, пытаемся переподключиться (попытка %d/%d)", attempt + 1, max_retries)
+                    await self._reconnect_if_needed()
+                    await asyncio.sleep(retry_delay)
+                    continue
+                
+                # Получаем объект канала по его ID
+                channel: discord.abc.Messageable | None = self.get_channel(channel_id) # type: ignore
+                
+                # Проверяем, что канал найден
+                if channel is None:
+                    _log.error("Канал с ID %s не найден", channel_id)
+                    return False
+                
+                # Отправляем сообщение в канал
+                await channel.send(message_content)
+                channel_name = getattr(channel, 'name', f'ID:{channel_id}')
+                _log.info("Сообщение успешно отправлено в канал '%s'", channel_name)
+                return True
+                
+            except (discord.ConnectionClosed, ConnectionResetError, OSError) as e:
+                _log.warning("Ошибка соединения (попытка %d/%d): %s", attempt + 1, max_retries, e)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                else:
+                    return self._handle_message_send_error(e, channel_id, "")
+                    
+            except (discord.Forbidden, discord.HTTPException, Exception) as e:
+                return self._handle_message_send_error(e, channel_id, "")
     
     async def send_message_with_files_to_channel(
         self, 
@@ -292,42 +320,61 @@ class DiscordBot(discord.Client):
         Returns:
             bool: True если сообщение отправлено успешно
         """
-        try:
-            channel: discord.abc.Messageable | None = self.get_channel(channel_id) # type: ignore
-            
-            if channel is None:
-                _log.error("Канал с ID %s не найден", channel_id)
-                return False
-            
-            # Разбиваем текст на части если он слишком длинный
-            text_parts = self._split_long_text(message_content)
-            
-            # Разбиваем файлы на группы
-            file_groups = self._split_files(file_paths, MAX_FILES_PER_MESSAGE)
-            
-            # Отправляем первую часть текста с первой группой файлов
-            if file_groups:
-                files = [discord.File(file_path) for file_path in file_groups[0] if Path(file_path).exists()]
-                await channel.send(content=text_parts[0] if text_parts else "", files=files)
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                # Проверяем состояние подключения
+                if self.is_closed():
+                    _log.warning("Соединение закрыто, пытаемся переподключиться (попытка %d/%d)", attempt + 1, max_retries)
+                    await self._reconnect_if_needed()
+                    await asyncio.sleep(retry_delay)
+                    continue
                 
-                # Отправляем остальные группы файлов
-                for file_group in file_groups[1:]:
-                    files = [discord.File(file_path) for file_path in file_group if Path(file_path).exists()]
+                channel: discord.abc.Messageable | None = self.get_channel(channel_id) # type: ignore
+                
+                if channel is None:
+                    _log.error("Канал с ID %s не найден", channel_id)
+                    return False
+                
+                # Разбиваем текст на части если он слишком длинный
+                text_parts = self._split_long_text(message_content)
+                
+                # Разбиваем файлы на группы
+                file_groups = self._split_files(file_paths, MAX_FILES_PER_MESSAGE)
+                
+                # Отправляем первую часть текста с первой группой файлов
+                if file_groups:
+                    files = [discord.File(file_path) for file_path in file_groups[0] if Path(file_path).exists()]
+                    await channel.send(content=text_parts[0] if text_parts else "", files=files)
+                    
+                    # Отправляем остальные группы файлов
+                    for file_group in file_groups[1:]:
+                        files = [discord.File(file_path) for file_path in file_group if Path(file_path).exists()]
+                        await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)  # Задержка между сообщениями
+                        await channel.send(files=files)
+                else:
+                    # Если нет файлов, отправляем только текст
+                    await channel.send(content=text_parts[0] if text_parts else "")
+                
+                # Отправляем остальные части текста
+                for text_part in text_parts[1:]:
                     await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)  # Задержка между сообщениями
-                    await channel.send(files=files)
-            else:
-                # Если нет файлов, отправляем только текст
-                await channel.send(content=text_parts[0] if text_parts else "")
-            
-            # Отправляем остальные части текста
-            for text_part in text_parts[1:]:
-                await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)  # Задержка между сообщениями
-                await channel.send(content=text_part)
-            
-            return True
-            
-        except (discord.Forbidden, discord.NotFound, discord.HTTPException, Exception) as e:
-            return self._handle_message_send_error(e, channel_id, "с файлами")
+                    await channel.send(content=text_part)
+                
+                return True
+                
+            except (discord.ConnectionClosed, ConnectionResetError, OSError) as e:
+                _log.warning("Ошибка соединения при отправке с файлами (попытка %d/%d): %s", attempt + 1, max_retries, e)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                else:
+                    return self._handle_message_send_error(e, channel_id, "с файлами")
+                    
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException, Exception) as e:
+                return self._handle_message_send_error(e, channel_id, "с файлами")
     
     def _handle_message_send_error(self, error: Exception, channel_id: int, error_type: str) -> bool:
         """
@@ -347,6 +394,8 @@ class DiscordBot(discord.Client):
             _log.error("Канал %s не найден", channel_id)
         elif isinstance(error, discord.HTTPException):
             _log.error("HTTP ошибка при отправке сообщения %s в канал %s: %s", error_type, channel_id, error)
+        elif isinstance(error, (discord.ConnectionClosed, ConnectionResetError, OSError)):
+            _log.error("Ошибка подключения при отправке сообщения %s в канал %s: %s", error_type, channel_id, error)
         else:
             _log.exception("Неожиданная ошибка при отправке сообщения %s в канал %s: %s", error_type, channel_id, error)
         return False
