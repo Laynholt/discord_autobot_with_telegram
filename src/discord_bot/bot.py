@@ -107,11 +107,9 @@ class DiscordBot(discord.Client):
         # Если установлен wait_until_target_day, возвращаем эту дату + уже сгенерированное время
         if self._wait_until_target_day is not None:
             target_date = self._calculate_wait_until_target_date(moscow_now)
-            target_datetime = datetime.combine(
-                target_date.date(), 
-                self._next_target_time,
-                self.moscow_tz
-            )
+            # Создаем naive datetime и затем локализуем его, чтобы избежать проблем с LMT/MSK
+            target_datetime_naive = datetime.combine(target_date.date(), self._next_target_time)
+            target_datetime = self.moscow_tz.localize(target_datetime_naive)
             return target_datetime.strftime('%H:%M:%S - %d.%m.%Y')
         
         # Если автоотправка отключена
@@ -122,7 +120,9 @@ class DiscordBot(discord.Client):
         current_date = moscow_now.date()
         for days_ahead in range(8):  # Максимум неделя вперед
             check_date = current_date + timedelta(days=days_ahead)
-            check_datetime = datetime.combine(check_date, moscow_now.time(), self.moscow_tz)
+            # Создаем naive datetime и затем локализуем его, чтобы избежать проблем с LMT/MSK
+            check_datetime_naive = datetime.combine(check_date, moscow_now.time())
+            check_datetime = self.moscow_tz.localize(check_datetime_naive)
             
             if self.is_weekday(check_datetime):
                 # Если это сегодня
@@ -133,6 +133,7 @@ class DiscordBot(discord.Client):
                     # Если уже отправлялось сегодня, переходим к следующему дню
                     if self._was_sent_today and moscow_now.time() >= self._start_time:
                         continue
+                # Создаем naive datetime для корректного форматирования
                 next_time = datetime.combine(check_date, self._next_target_time)
                 return next_time.strftime('%H:%M:%S - %d.%m.%Y')
         
@@ -517,7 +518,9 @@ class DiscordBot(discord.Client):
                 target_year = moscow_now.year if moscow_now.month < 12 else moscow_now.year + 1
         elif self._wait_until_target_day == moscow_now.day:
             # Если это сегодня, проверяем время
-            target_datetime = datetime.combine(moscow_now.date(), self._start_time)
+            # Создаем naive datetime для сравнения времен
+            target_datetime_naive = datetime.combine(moscow_now.date(), self._start_time)
+            target_datetime = self.moscow_tz.localize(target_datetime_naive)
             if target_datetime > moscow_now:
                 # Время еще не прошло сегодня
                 target_month, target_year = moscow_now.month, moscow_now.year
@@ -558,11 +561,17 @@ class DiscordBot(discord.Client):
             next_datetime (datetime): Дата и время, до которых ждать.
         """
         current_datetime: datetime = datetime.now(self.moscow_tz)
-        
+
+        # Убеждаемся, что оба datetime имеют одинаковую timezone информацию
+        if next_datetime.tzinfo is None:
+            next_datetime = self.moscow_tz.localize(next_datetime)
+        elif next_datetime.tzinfo != self.moscow_tz:
+            next_datetime = next_datetime.astimezone(self.moscow_tz)
+
         # Если текущее время больше переданного, то ожидаем до следующего для по переданному времени
         if current_datetime > next_datetime:
             next_datetime += timedelta(days=1)
-        
+
         time_difference = next_datetime - current_datetime
         wait_seconds: float = time_difference.total_seconds()
         
@@ -730,7 +739,9 @@ class DiscordBot(discord.Client):
         # Ищем следующий рабочий день
         for days_ahead in range(8):  # Максимум неделя вперед
             check_date = current_date + timedelta(days=days_ahead)
-            check_datetime = datetime.combine(check_date, self._start_time, self.moscow_tz)
+            # Создаем naive datetime и затем локализуем его, чтобы избежать проблем с LMT/MSK
+            check_datetime_naive = datetime.combine(check_date, self._start_time)
+            check_datetime = self.moscow_tz.localize(check_datetime_naive)
             
             if self.is_weekday(check_datetime):
                 # Если это сегодня
