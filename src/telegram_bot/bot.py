@@ -30,6 +30,7 @@ _log = logging.getLogger(__name__)
 class BotStates(StatesGroup):
     waiting_message_text = State()
     waiting_day_number = State()
+    waiting_next_auto_mark_time = State()
     waiting_delayed_message_text = State()
     waiting_delayed_message_datetime = State()
     waiting_delayed_message_attachments = State()
@@ -389,6 +390,7 @@ class TelegramBotController:
         # Автоотметка
         self.dp.callback_query(F.data == "toggle_auto_mark")(self.toggle_auto_mark_callback)
         self.dp.callback_query(F.data == "regenerate_time")(self.regenerate_time_callback)
+        self.dp.callback_query(F.data == "set_next_auto_mark_time")(self.set_next_auto_mark_time_callback)
         
         # Настройки сообщения
         self.dp.callback_query(F.data == "set_message_text")(self.set_message_text_callback)
@@ -414,6 +416,7 @@ class TelegramBotController:
         # Обработчики состояний
         self.dp.message(BotStates.waiting_message_text)(self.process_message_text)
         self.dp.message(BotStates.waiting_day_number)(self.process_day_number)
+        self.dp.message(BotStates.waiting_next_auto_mark_time)(self.process_next_auto_mark_time)
         self.dp.message(BotStates.waiting_delayed_message_text)(self.process_delayed_message_text)
         self.dp.message(BotStates.waiting_delayed_message_datetime)(self.process_delayed_message_datetime)
         self.dp.message(BotStates.waiting_delayed_message_attachments)(self.process_delayed_message_attachments)
@@ -434,6 +437,29 @@ class TelegramBotController:
     def get_back_keyboard(self, back_to: str = "main_menu") -> InlineKeyboardMarkup:
         """Создает клавиатуру с кнопкой 'Назад'"""
         builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=back_to))
+        return builder.as_markup()
+
+    def _get_auto_mark_toggle_button_text(self) -> str:
+        """Текст кнопки включения/выключения автоотметки"""
+        return (
+            "🔴 Выключить"
+            if self.discord_bot.should_send_mark_message
+            else "🟢 Включить"
+        )
+
+    def get_auto_mark_menu_keyboard(self, back_to: str = "main_menu") -> InlineKeyboardMarkup:
+        """Клавиатура раздела автоотметки"""
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(
+                text=self._get_auto_mark_toggle_button_text(),
+                callback_data="toggle_auto_mark"
+            )
+        )
+        builder.row(InlineKeyboardButton(text="🕒 Задать время вручную", callback_data="set_next_auto_mark_time"))
+        if self.discord_bot.should_send_mark_message:
+            builder.row(InlineKeyboardButton(text="🎲 Перегенерировать время", callback_data="regenerate_time"))
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data=back_to))
         return builder.as_markup()
     
@@ -482,18 +508,12 @@ class TelegramBotController:
         status = "✅ Включена" if self.discord_bot.should_send_mark_message else "❌ Отключена"
         next_send_time = self.discord_bot.next_target_time
         
-        builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text="🔄 Переключить", callback_data="toggle_auto_mark"))
-        if self.discord_bot.should_send_mark_message:
-            builder.row(InlineKeyboardButton(text="🎲 Перегенерировать время", callback_data="regenerate_time"))
-        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu"))
-        
         await callback.message.edit_text(
             f"🔔 *Ежедневная автоотметка*\n\n"
             f"Автоматическая отправка сообщений в рабочие дни (пн-пт) с 10:30 до 12:00 МСК\n\n"
             f"Текущий статус: _{status}_\n"
             f"Следующая отправка: _{next_send_time}_",
-            reply_markup=builder.as_markup(),
+            reply_markup=self.get_auto_mark_menu_keyboard(),
             parse_mode="Markdown"
         )
         await callback.answer()
@@ -514,7 +534,7 @@ class TelegramBotController:
             action = "включена"
         
         builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text="🔄 Переключить еще раз", callback_data="toggle_auto_mark"))
+        builder.row(InlineKeyboardButton(text=self._get_auto_mark_toggle_button_text(), callback_data="toggle_auto_mark"))
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="auto_mark_menu"))
         
         await callback.message.edit_text(
@@ -525,7 +545,63 @@ class TelegramBotController:
         )
         await callback.answer(f"Автоотметка {action}!")
         _log.info(f"Автоотметка {action} пользователем {callback.from_user.id}")
-    
+
+    async def set_next_auto_mark_time_callback(self, callback: types.CallbackQuery, state: FSMContext):
+        """Начало ручной установки времени следующей автоотметки"""
+        if not self.check_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+
+        await callback.message.edit_text(
+            "🕒 Введите время следующей автоотметки в формате HH:MM или HH:MM:SS\n"
+            "Допустимый диапазон: 10:30:00 - 12:00:00 МСК",
+            reply_markup=self.get_back_keyboard("auto_mark_menu")
+        )
+        await state.set_state(BotStates.waiting_next_auto_mark_time)
+        await callback.answer()
+
+    async def process_next_auto_mark_time(self, message: types.Message, state: FSMContext):
+        """Обработка ручного времени следующей автоотметки"""
+        if not self.check_owner(message.from_user.id):
+            return
+
+        raw_value = (message.text or "").strip()
+        parsed_time = None
+
+        for time_format in ("%H:%M:%S", "%H:%M"):
+            try:
+                parsed_time = datetime.strptime(raw_value, time_format).time()
+                break
+            except ValueError:
+                continue
+
+        if parsed_time is None:
+            await message.answer(
+                "❌ Неверный формат времени. Используйте HH:MM или HH:MM:SS:"
+            )
+            return
+
+        try:
+            self.discord_bot.set_next_target_time_once(parsed_time)
+        except ValueError as e:
+            await message.answer(f"❌ {e}")
+            return
+
+        await state.clear()
+        await message.answer(
+            f"✅ *Следующая автоотметка обновлена!*\n\n"
+            f"Одноразово установлено время: `{parsed_time.strftime('%H:%M:%S')}`\n"
+            f"Далее время снова будет генерироваться случайно.\n\n"
+            f"Следующая отправка: _{self.discord_bot.next_target_time}_",
+            reply_markup=self.get_back_keyboard("auto_mark_menu"),
+            parse_mode="Markdown"
+        )
+        _log.info(
+            "Следующее время автоотметки вручную установлено пользователем %s: %s",
+            message.from_user.id,
+            parsed_time.strftime("%H:%M:%S")
+        )
+
     async def regenerate_time_callback(self, callback: types.CallbackQuery):
         """Перегенерация времени отправки"""
         if not self.check_owner(callback.from_user.id):
@@ -543,12 +619,6 @@ class TelegramBotController:
         next_send_time = self.discord_bot.next_target_time
         
         # Обновляем кнопки
-        builder = InlineKeyboardBuilder()
-        builder.row(InlineKeyboardButton(text="🔄 Переключить", callback_data="toggle_auto_mark"))
-        if self.discord_bot.should_send_mark_message:
-            builder.row(InlineKeyboardButton(text="🎲 Перегенерировать время", callback_data="regenerate_time"))
-        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu"))
-
         try:
             await callback.message.edit_text(
                 f"🔔 *Ежедневная автоотметка*\n\n"
@@ -556,7 +626,7 @@ class TelegramBotController:
                 f"Текущий статус: _{status}_\n"
                 f"Следующая отправка: _{next_send_time}_\n\n"
                 f"🎲 *Время перегенерировано!*",
-                reply_markup=builder.as_markup(),
+                reply_markup=self.get_auto_mark_menu_keyboard(),
                 parse_mode="Markdown"
             )
             await callback.answer("🎲 Время отправки перегенерировано!")

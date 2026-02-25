@@ -203,15 +203,34 @@ class DiscordBot(discord.Client):
         else:
             # Если время уже установлено, генерируем новое время начиная с установленного момента
             # до конца рабочего диапазона
+            locked_time = self._next_target_time_locked or self._next_target_time
             _start_datetime = current_datetime.replace(
-                hour=self._next_target_time_locked.hour,
-                minute=self._next_target_time_locked.minute,
-                second=self._next_target_time_locked.second,
+                hour=locked_time.hour,
+                minute=locked_time.minute,
+                second=locked_time.second,
                 microsecond=0,
             )
         
         # Генерируем новое случайное время
         self._next_target_time = self._initialize_next_target_time(_start_datetime)
+
+    def set_next_target_time_once(self, next_time: time) -> None:
+        """
+        Устанавливает время следующей автоотправки вручную (одноразово).
+
+        После отправки планировщик продолжит обычную случайную генерацию времени.
+        """
+        if not isinstance(next_time, time):
+            raise TypeError("next_time должен быть datetime.time")
+
+        if not (self._start_time <= next_time <= self._end_time):
+            raise ValueError(
+                "Время должно быть в диапазоне "
+                f"{self._start_time.strftime('%H:%M:%S')} - {self._end_time.strftime('%H:%M:%S')} МСК"
+            )
+
+        self._next_target_time = next_time
+        _log.info("Следующее время автоотправки вручную установлено на %s", next_time.strftime("%H:%M:%S"))
 
     def get_target_time_raw(self) -> time:
         """
