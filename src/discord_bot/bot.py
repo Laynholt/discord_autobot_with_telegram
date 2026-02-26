@@ -306,8 +306,15 @@ class DiscordBot(discord.Client):
                     _log.error("Канал с ID %s не найден", channel_id)
                     return False
                 
-                # Отправляем сообщение в канал
-                await channel.send(message_content)
+                # Разбиваем текст на части если он слишком длинный
+                text_parts = self._split_long_text(message_content)
+
+                # Отправляем сообщение(я) в канал
+                for index, text_part in enumerate(text_parts):
+                    if index > 0:
+                        await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)
+                    await channel.send(text_part)
+
                 channel_name = getattr(channel, 'name', f'ID:{channel_id}')
                 _log.info("Сообщение успешно отправлено в канал '%s'", channel_name)
                 return True
@@ -425,27 +432,48 @@ class DiscordBot(discord.Client):
         if len(text) <= max_length:
             return [text]
         
-        parts = []
+        parts: list[str] = []
         current_part = ""
+        
+        def append_part(part: str) -> None:
+            cleaned = part.rstrip()
+            # Discord не принимает пустые сообщения; пустые куски "теряют" первую часть
+            # при отправке, если появились из-за переносов/пробелов.
+            if cleaned:
+                parts.append(cleaned)
         
         lines = text.split('\n')
         
         for line in lines:
             if len(line) > max_length:
                 if current_part:
-                    parts.append(current_part.rstrip())
+                    append_part(current_part)
                     current_part = ""
                 
                 words = line.split(' ')
                 temp_line = ""
                 
                 for word in words:
-                    if len(temp_line + word + " ") <= max_length:
-                        temp_line += word + " "
-                    else:
-                        if temp_line:
-                            parts.append(temp_line.rstrip())
-                        temp_line = word + " "
+                    candidate = word + " "
+
+                    # Если слово не помещается в текущую часть, переносим его в следующую.
+                    if len(temp_line + candidate) > max_length and temp_line:
+                        append_part(temp_line)
+                        temp_line = ""
+
+                    # После переноса слово может поместиться целиком.
+                    if len(candidate) <= max_length:
+                        temp_line += candidate
+                        continue
+
+                    # Крайний случай: один токен длиннее лимита Discord (например, очень длинный URL/токен).
+                    remaining_word = word
+                    while len(remaining_word) > max_length:
+                        parts.append(remaining_word[:max_length])
+                        remaining_word = remaining_word[max_length:]
+                    
+                    if remaining_word:
+                        temp_line = remaining_word + " "
                 
                 if temp_line:
                     current_part = temp_line
@@ -454,11 +482,11 @@ class DiscordBot(discord.Client):
                     current_part += line + "\n"
                 else:
                     if current_part:
-                        parts.append(current_part.rstrip())
+                        append_part(current_part)
                     current_part = line + "\n"
         
         if current_part:
-            parts.append(current_part.rstrip())
+            append_part(current_part)
         
         return parts if parts else [text[:max_length]]
     

@@ -85,6 +85,9 @@ class TelegramBotController:
         
         # Задачи для отложенных сообщений
         self.delayed_tasks: dict[int, asyncio.Task] = {}
+        # Последовательная отправка нужна, чтобы сообщения с одинаковым временем
+        # уходили строго в порядке добавления.
+        self._delayed_send_lock = asyncio.Lock()
         
         self._setup_handlers()
         
@@ -206,7 +209,14 @@ class TelegramBotController:
     
     def _restore_delayed_tasks(self):
         """Восстанавливает задачи планировщика для загруженных отложенных сообщений"""
-        for msg_id, delayed_msg in self.delayed_messages.items():
+        # Явно сортируем, чтобы после перезапуска сохранить порядок отправки
+        # при совпадающем времени (по времени создания/ID).
+        sorted_messages = sorted(
+            self.delayed_messages.items(),
+            key=lambda item: (item[1].date_time, item[1].created_at, item[1].id)
+        )
+        
+        for msg_id, delayed_msg in sorted_messages:
             try:
                 # Создаем задачу для отправки сообщения
                 task = asyncio.create_task(self.schedule_delayed_message(delayed_msg))
@@ -216,6 +226,25 @@ class TelegramBotController:
                 _log.error(f"Ошибка при восстановлении задачи для сообщения #{msg_id}: {e}")
         
         _log.info(f"Восстановлено {len(self.delayed_tasks)} задач планировщика")
+
+    def _has_same_time_predecessor(self, delayed_msg: DelayedMessage) -> bool:
+        """
+        Проверяет, есть ли еще неотправленное сообщение с тем же временем,
+        которое было добавлено раньше текущего.
+        """
+        current_order_key = (delayed_msg.created_at, delayed_msg.id)
+        
+        for other in self.delayed_messages.values():
+            if other.id == delayed_msg.id:
+                continue
+            if other.date_time != delayed_msg.date_time:
+                continue
+            
+            other_order_key = (other.created_at, other.id)
+            if other_order_key < current_order_key:
+                return True
+        
+        return False
     
     async def validate_file(self, file_id: str) -> tuple[bool, str, int]:
         """
@@ -966,56 +995,71 @@ class TelegramBotController:
             if wait_seconds > 0:
                 _log.info(f"Ожидание отправки сообщения #{delayed_msg.id} в течение {wait_seconds} секунд")
                 await asyncio.sleep(wait_seconds)
-            
-            # Отправляем сообщение (с файлами или без)
-            if delayed_msg.attachments:
-                file_paths = [att.file_path for att in delayed_msg.attachments]
-                success = await self.discord_bot.send_message_with_files_to_channel(
-                    channel_id=self.discord_bot._private_channel_id,
-                    message_content=delayed_msg.text,
-                    file_paths=file_paths
-                )
-            else:
-                success = await self.discord_bot.send_message_to_channel(
-                    channel_id=self.discord_bot._private_channel_id,
-                    message_content=delayed_msg.text
-                )
-            
-            if success:
-                _log.info(f"Отложенное сообщение #{delayed_msg.id} успешно отправлено")
-                # Уведомляем в телеграм
-                try:
-                    await self.bot.send_message(
-                        self.owner_id,
-                        f"✅ *Отложенное сообщение отправлено!*\n\n"
-                        f"📝 Текст:\n`{delayed_msg.text}`\n"
-                        f"⏰ Время: _{delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_",
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    _log.error(f"Не удалось отправить уведомление о доставке: {e}")
-            else:
-                _log.error(f"Не удалось отправить отложенное сообщение #{delayed_msg.id}")
-                # Уведомляем об ошибке
-                try:
-                    await self.bot.send_message(
-                        self.owner_id,
-                        f"❌ *Ошибка отправки отложенного сообщения!*\n\n"
-                        f"📝 Текст:\n`{delayed_msg.text}`\n"
-                        f"⏰ Время: _{delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_",
-                        parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    _log.error(f"Не удалось отправить уведомление об ошибке: {e}")
-            
-            # Очищаем временные файлы и удаляем из хранилища
-            self.cleanup_message_files(delayed_msg.id)
-            if delayed_msg.id in self.delayed_messages:
-                del self.delayed_messages[delayed_msg.id]
-                # Сохраняем изменения после успешной отправки
-                self.save_delayed_messages()
-            if delayed_msg.id in self.delayed_tasks:
-                del self.delayed_tasks[delayed_msg.id]
+
+            while True:
+                async with self._delayed_send_lock:
+                    # Сообщение могли отменить, пока задача ждала своего времени
+                    if delayed_msg.id not in self.delayed_messages:
+                        _log.info(f"Отложенное сообщение #{delayed_msg.id} уже отсутствует в хранилище, отправка пропущена")
+                        return
+
+                    if self._has_same_time_predecessor(delayed_msg):
+                        # Есть более раннее сообщение с тем же временем — ждём своей очереди.
+                        pass
+                    else:
+                        # Отправляем сообщение (с файлами или без)
+                        if delayed_msg.attachments:
+                            file_paths = [att.file_path for att in delayed_msg.attachments]
+                            success = await self.discord_bot.send_message_with_files_to_channel(
+                                channel_id=self.discord_bot._private_channel_id,
+                                message_content=delayed_msg.text,
+                                file_paths=file_paths
+                            )
+                        else:
+                            success = await self.discord_bot.send_message_to_channel(
+                                channel_id=self.discord_bot._private_channel_id,
+                                message_content=delayed_msg.text
+                            )
+                        
+                        if success:
+                            _log.info(f"Отложенное сообщение #{delayed_msg.id} успешно отправлено")
+                            # Уведомляем в телеграм
+                            try:
+                                await self.bot.send_message(
+                                    self.owner_id,
+                                    f"✅ *Отложенное сообщение отправлено!*\n\n"
+                                    f"📝 Текст:\n`{delayed_msg.text}`\n"
+                                    f"⏰ Время: _{delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_",
+                                    parse_mode="Markdown"
+                                )
+                            except Exception as e:
+                                _log.error(f"Не удалось отправить уведомление о доставке: {e}")
+                        else:
+                            _log.error(f"Не удалось отправить отложенное сообщение #{delayed_msg.id}")
+                            # Уведомляем об ошибке
+                            try:
+                                await self.bot.send_message(
+                                    self.owner_id,
+                                    f"❌ *Ошибка отправки отложенного сообщения!*\n\n"
+                                    f"📝 Текст:\n`{delayed_msg.text}`\n"
+                                    f"⏰ Время: _{delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_",
+                                    parse_mode="Markdown"
+                                )
+                            except Exception as e:
+                                _log.error(f"Не удалось отправить уведомление об ошибке: {e}")
+                        
+                        # Очищаем временные файлы и удаляем из хранилища
+                        self.cleanup_message_files(delayed_msg.id)
+                        if delayed_msg.id in self.delayed_messages:
+                            del self.delayed_messages[delayed_msg.id]
+                            # Сохраняем изменения после успешной отправки
+                            self.save_delayed_messages()
+                        if delayed_msg.id in self.delayed_tasks:
+                            del self.delayed_tasks[delayed_msg.id]
+
+                        return
+
+                await asyncio.sleep(0.2)
                 
         except asyncio.CancelledError:
             _log.info(f"Отправка отложенного сообщения #{delayed_msg.id} отменена")
