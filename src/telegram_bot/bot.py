@@ -15,7 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
@@ -437,6 +437,7 @@ class TelegramBotController:
         self.dp.callback_query(F.data.startswith("edit_datetime_"))(self.edit_delayed_datetime_callback)
         self.dp.callback_query(F.data.startswith("manage_attachments_"))(self.manage_attachments_callback)
         self.dp.callback_query(F.data.startswith("add_attachments_"))(self.add_attachments_callback)
+        self.dp.callback_query(F.data.startswith("view_attachment_"))(self.view_attachment_callback)
         self.dp.callback_query(F.data.startswith("delete_attachment_"))(self.delete_attachment_callback)
         self.dp.callback_query(F.data.startswith("save_attachments_"))(self.save_attachments_callback)
         self.dp.callback_query(F.data == "create_without_files")(self.create_without_files_callback)
@@ -1374,6 +1375,7 @@ class TelegramBotController:
         if msg.attachments:
             text = f"📎 *Управление вложениями сообщения #{message_id}*\n\n"
             text += f"*Всего вложений:* {len(msg.attachments)}\n\n"
+            text += "_Нажмите на название файла для просмотра, 🗑 для удаления._\n\n"
             
             for i, att in enumerate(msg.attachments, 1):
                 att_type = "🖼" if att.is_image else "📁"
@@ -1387,14 +1389,18 @@ class TelegramBotController:
         # Создаем кнопки управления
         builder = InlineKeyboardBuilder()
         
-        # Если есть вложения, добавляем кнопки удаления
+        # Если есть вложения, добавляем кнопки просмотра и удаления
         if msg.attachments:
             for i, att in enumerate(msg.attachments):
                 att_type = "🖼" if att.is_image else "📁"
                 short_name = att.original_name[:20] + "..." if len(att.original_name) > 20 else att.original_name
                 builder.row(
                     InlineKeyboardButton(
-                        text=f"🗑 {att_type} {short_name}", 
+                        text=f"{att_type} {short_name}",
+                        callback_data=f"view_attachment_{message_id}_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑",
                         callback_data=f"delete_attachment_{message_id}_{i}"
                     )
                 )
@@ -1409,6 +1415,48 @@ class TelegramBotController:
             parse_mode="Markdown"
         )
         await callback.answer()
+
+    async def view_attachment_callback(self, callback: types.CallbackQuery):
+        """Просмотр вложения из меню управления файлами"""
+        if not self.check_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+
+        parts = callback.data.split("_")
+        message_id = int(parts[2])
+        attachment_index = int(parts[3])
+
+        if message_id not in self.delayed_messages:
+            await callback.answer("❌ Сообщение не найдено")
+            return
+
+        msg = self.delayed_messages[message_id]
+        if attachment_index >= len(msg.attachments):
+            await callback.answer("❌ Вложение не найдено")
+            return
+
+        attachment = msg.attachments[attachment_index]
+        if not os.path.exists(attachment.file_path):
+            await callback.answer("❌ Файл не найден на диске")
+            return
+
+        file_to_send = FSInputFile(attachment.file_path)
+        await callback.answer("Открываю файл...")
+
+        try:
+            if attachment.is_image:
+                await callback.message.answer_photo(
+                    photo=file_to_send,
+                    caption=f"🖼 {attachment.original_name}"
+                )
+            else:
+                await callback.message.answer_document(
+                    document=file_to_send,
+                    caption=f"📁 {attachment.original_name}"
+                )
+        except Exception as e:
+            _log.error(f"Ошибка при отправке вложения '{attachment.original_name}': {e}")
+            await callback.message.answer("❌ Не удалось отправить файл")
     
     async def delete_attachment_callback(self, callback: types.CallbackQuery):
         """Удаление конкретного вложения"""
@@ -1459,6 +1507,7 @@ class TelegramBotController:
         if msg.attachments:
             text = f"📎 *Управление вложениями сообщения #{message_id}*\n\n"
             text += f"*Всего вложений:* {len(msg.attachments)}\n\n"
+            text += "_Нажмите на название файла для просмотра, 🗑 для удаления._\n\n"
             
             for i, att in enumerate(msg.attachments, 1):
                 att_type = "🖼" if att.is_image else "📁"
@@ -1472,14 +1521,18 @@ class TelegramBotController:
         # Создаем кнопки управления
         builder = InlineKeyboardBuilder()
         
-        # Если есть вложения, добавляем кнопки удаления
+        # Если есть вложения, добавляем кнопки просмотра и удаления
         if msg.attachments:
             for i, att in enumerate(msg.attachments):
                 att_type = "🖼" if att.is_image else "📁"
                 short_name = att.original_name[:20] + "..." if len(att.original_name) > 20 else att.original_name
                 builder.row(
                     InlineKeyboardButton(
-                        text=f"🗑 {att_type} {short_name}", 
+                        text=f"{att_type} {short_name}",
+                        callback_data=f"view_attachment_{message_id}_{i}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🗑",
                         callback_data=f"delete_attachment_{message_id}_{i}"
                     )
                 )
