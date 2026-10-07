@@ -36,6 +36,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             _private_channel_id=2,
             send_message_to_channel=AsyncMock(return_value=False),
             send_message_with_files_to_channel=AsyncMock(return_value=False),
+            wait_until_ready=AsyncMock(),
         )
 
     def job(self, with_file=False):
@@ -190,3 +191,29 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(Path(job.attachments[0].file_path).exists())
         c._restore_delayed_tasks()
         self.assertEqual(c.delayed_tasks, {})
+
+    async def test_channel_cache_miss_fetches_from_discord(self):
+        bot = discord_module.DiscordBot(1, 2)
+        bot.wait_until_ready = AsyncMock()
+        bot.get_channel = lambda _: None
+        send = AsyncMock()
+        bot.fetch_channel = AsyncMock(return_value=SimpleNamespace(send=send))
+        self.assertTrue(await bot.send_message_to_channel(42, "hello"))
+        bot.fetch_channel.assert_awaited_once_with(42)
+        send.assert_awaited_once()
+
+    async def test_restored_job_waits_for_discord_ready(self):
+        c = self.controller
+        ready = asyncio.Event()
+        c.discord_bot.wait_until_ready = ready.wait
+        job = self.job()
+        task = asyncio.create_task(c.schedule_delayed_message(job))
+        try:
+            await asyncio.sleep(0)
+            c.discord_bot.send_message_to_channel.assert_not_awaited()
+            ready.set()
+            await task
+            c.discord_bot.send_message_to_channel.assert_awaited_once()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

@@ -1011,6 +1011,8 @@ class TelegramBotController:
                 _log.info(f"Ожидание отправки сообщения #{delayed_msg.id} в течение {wait_seconds} секунд")
                 await asyncio.sleep(wait_seconds)
 
+            await self.discord_bot.wait_until_ready()
+
             while True:
                 async with self._delayed_send_lock:
                     # Сообщение могли отменить, пока задача ждала своего времени

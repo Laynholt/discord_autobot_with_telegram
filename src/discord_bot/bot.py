@@ -311,8 +311,10 @@ class DiscordBot(discord.Client):
                     continue
                 channel = self.get_channel(channel_id)
                 if channel is None:
-                    _log.error("Канал с ID %s не найден", channel_id)
-                    return False
+                    await self.wait_until_ready()
+                    channel = self.get_channel(channel_id)
+                    if channel is None:
+                        channel = await self.fetch_channel(channel_id)
                 while progress.get("next_part", 0) < len(parts):
                     index = progress.get("next_part", 0)
                     text, paths = parts[index]
