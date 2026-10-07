@@ -1982,18 +1982,6 @@ class TelegramBotController:
     
     async def stop(self):
         """Остановка бота"""
-        # Сохраняем отложенные сообщения перед остановкой
-        _log.info("Сохранение отложенных сообщений перед остановкой...")
-        try:
-            self.save_delayed_messages()
-        except OSError:
-            _log.exception("Не удалось сохранить очередь при остановке")
-        
-        tasks = list(self.delayed_tasks.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.delayed_tasks.clear()
         polling = self._polling_task
         try:
             if polling is not None and not polling.done():
@@ -2008,6 +1996,17 @@ class TelegramBotController:
             for task in updates:
                 task.cancel()
             await asyncio.gather(*updates, return_exceptions=True)
+            # Producers are stopped; no update can create a new delayed task now.
+            tasks = list(self.delayed_tasks.values())
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.delayed_tasks.clear()
+            try:
+                self.save_delayed_messages()
+            except OSError:
+                _log.exception("Не удалось сохранить очередь при остановке")
+
         finally:
             self.discord_bot.on_auto_mark_failure = None
             await self.bot.session.close()
