@@ -60,6 +60,7 @@ class DiscordBot(discord.Client):
         self._auto_attempts = 0
         self._auto_failure_date = None
         self._auto_delivery_progress = {}
+        self._auto_message_text = None
         self.on_auto_mark_failure = None
         self._schedule_changed = asyncio.Event()
         self._is_mark_enabled: bool = True
@@ -94,6 +95,7 @@ class DiscordBot(discord.Client):
                 "auto_attempts": self._auto_attempts,
                 "auto_failure_date": self._auto_failure_date.isoformat() if self._auto_failure_date else None,
                 "auto_delivery_progress": self._auto_delivery_progress,
+                "auto_message_text": self._auto_message_text,
             })
 
     def _load_settings(self):
@@ -117,6 +119,9 @@ class DiscordBot(discord.Client):
         self._auto_failure_date = date.fromisoformat(data["auto_failure_date"]) if data.get("auto_failure_date") else None
         self._auto_attempts = data.get("auto_attempts", 0)
         self._auto_delivery_progress = data.get("auto_delivery_progress", {})
+        self._auto_message_text = data.get("auto_message_text")
+        if self._auto_delivery_progress and self._auto_message_text is None:
+            self._auto_delivery_progress["uncertain"] = True
 
     def _update_settings(self, **values):
         previous = {key: getattr(self, key) for key in values}
@@ -761,14 +766,15 @@ class DiscordBot(discord.Client):
             self._auto_attempt_date = now.date()
             self._auto_attempts = 0
             self._auto_delivery_progress = {}
+            self._auto_message_text = self._chat_channel_message
         day = now.date()
-        while self._auto_attempts < 3:
+        while self._auto_attempts < 3 and not self._auto_delivery_progress.get("uncertain"):
             if not self._can_send_mark(datetime.now(self.moscow_tz)):
                 return
             self._auto_attempts += 1
             self._save_settings()
             success = await self.send_message_to_channel(
-                channel_id=self._chat_channel_id, message_content=self._chat_channel_message,
+                channel_id=self._chat_channel_id, message_content=self._auto_message_text,
                 progress=self._auto_delivery_progress, on_progress=self._save_settings,
                 can_send=lambda: self._can_send_mark(datetime.now(self.moscow_tz)),
             )

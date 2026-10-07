@@ -394,3 +394,26 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(task, return_exceptions=True)
         self.assertTrue(progress["uncertain"])
         self.assertTrue(saved[-1]["uncertain"])
+
+    async def test_auto_attempt_keeps_its_original_payload_after_text_change(self):
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
+        bot.chat_channel_message = "x" * 2100
+        received = []
+        first_attempt = True
+        async def send(**kwargs):
+            nonlocal first_attempt
+            if received and first_attempt:
+                first_attempt = False
+                raise RuntimeError("second part rejected")
+            received.append(kwargs["content"])
+        bot.get_channel = lambda _: SimpleNamespace(send=send)
+        async def retry(target):
+            bot.chat_channel_message = "NEW"
+            return True
+        bot.wait_until_next_date = retry
+        with patch.object(discord_module, "datetime", Clock), \
+             patch.object(discord_module.asyncio, "sleep", new=AsyncMock()):
+            Clock.current = bot.moscow_tz.localize(datetime(2026, 10, 9, 11))
+            await bot._send_scheduled_message()
+        self.assertEqual(list(map(len, received)), [2000, 100])
+        self.assertEqual(bot.chat_channel_message, "NEW")

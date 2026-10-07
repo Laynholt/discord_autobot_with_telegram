@@ -40,3 +40,35 @@ For each row: write the named regression in tests/test_reliability.py (or tests/
 Prerequisite discovered while importing the locked runtime: discord-py-self 2.0.1 fails on Python 3.13 (CachedSlotProperty signature). Task 1 also updates this dependency to 2.1.0 and its required curl-cffi/cffi versions; other locked versions stay unchanged. Tests use Python 3.13.3 with the resulting lock.
 
 Use the isolated Python 3.13 environment outside the repository with locked dependencies. Run `python -m unittest discover -s tests`, `python tests/test_scheduler.py`, compileall and git diff --check. Validate POSIX signals/EOF in Linux if available; record any platform limitation. Final independent review is read-only and focuses on the whole resulting change.
+
+## Completion ledger
+
+All 17 planned tasks completed sequentially with offline regression checks and separate commits:
+
+| Task | Commit |
+|---|---|
+| 1 | 485cfd7 |
+| 2 | a4055c3 |
+| 3 | e901364 |
+| 4 | 77fd58d |
+| 5 | 9e069e0 |
+| 6 | 8c50420 |
+| 7 | c535f8d |
+| 8 | c60416e |
+| 9 | 87a1e1b |
+| 10 | 2122a8f |
+| 11 | 4decfe9 |
+| 12 | 183f80d |
+| 13 | 497fd7d |
+| 14 | cc4af74 |
+| 15 | 2c02902 |
+| 16 | 5040078 |
+| 17 | 76ba85d |
+
+Independent review of 1123d88..76ba85d found three additional races; each has a failing reproduction and its own corrective commit:
+
+- baef350: active delivery cannot be changed, deleted or rescheduled; cancellation records uncertain receipt.
+- fd5cbc0: stop polling and update handlers before taking the final delayed-task snapshot. Also verifies real aiogram routing and polling cleanup.
+- This commit: keep the auto-mark attempt's original text with its durable progress, and refuse automatic resend after an uncertain cancellation.
+
+POSIX tests run in WSL Ubuntu 24.04 with the project lock and Python 3.13.3. Real PTY Ctrl+C, Ctrl+Z, Ctrl+D and direct SIGINT/SIGTERM/SIGTSTP/SIGHUP all exit cleanly; noninteractive stdin EOF leaves the service running. No real Telegram/Discord requests, push or server restart.

@@ -783,7 +783,8 @@ class TelegramBotController:
         await state.clear()
         await self.send_text(message.answer,
             f"✅ *Текст сообщения обновлен!*\n\n"
-            f"Новый текст:\n{self.text_preview(new_text, 1000)}",
+            f"Новый текст:\n{self.text_preview(new_text, 1000)}\n\n"
+            f"Он применяется к следующей ещё не начатой автоотметке.",
             reply_markup=self.get_back_keyboard("message_settings_menu"),
             parse_mode="Markdown"
         )
