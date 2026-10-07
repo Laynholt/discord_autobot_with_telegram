@@ -55,6 +55,11 @@ class DiscordBot(discord.Client):
         self._private_channel_id: int = private_channel_id
         
         self._last_mark_date: date | None = None
+        self._auto_attempt_date = None
+        self._auto_attempts = 0
+        self._auto_failure_date = None
+        self._auto_delivery_progress = {}
+        self.on_auto_mark_failure = None
         self._schedule_changed = asyncio.Event()
         self._is_mark_enabled: bool = True
         self._wait_until_target_day: int | None = None
@@ -84,6 +89,10 @@ class DiscordBot(discord.Client):
                 "wait_date": self._wait_until_target_date.isoformat() if self._wait_until_target_date else None,
                 "next_time": self._next_target_time.isoformat(),
                 "last_mark_date": self._last_mark_date.isoformat() if self._last_mark_date else None,
+                "auto_attempt_date": self._auto_attempt_date.isoformat() if self._auto_attempt_date else None,
+                "auto_attempts": self._auto_attempts,
+                "auto_failure_date": self._auto_failure_date.isoformat() if self._auto_failure_date else None,
+                "auto_delivery_progress": self._auto_delivery_progress,
             })
 
     def _load_settings(self):
@@ -103,6 +112,10 @@ class DiscordBot(discord.Client):
         self._wait_until_target_day = wait_day
         self._wait_until_target_date = wait_date
         self._last_mark_date = date.fromisoformat(data["last_mark_date"]) if data.get("last_mark_date") else None
+        self._auto_attempt_date = date.fromisoformat(data["auto_attempt_date"]) if data.get("auto_attempt_date") else None
+        self._auto_failure_date = date.fromisoformat(data["auto_failure_date"]) if data.get("auto_failure_date") else None
+        self._auto_attempts = data.get("auto_attempts", 0)
+        self._auto_delivery_progress = data.get("auto_delivery_progress", {})
 
     def _update_settings(self, **values):
         previous = {key: getattr(self, key) for key in values}
@@ -184,7 +197,7 @@ class DiscordBot(discord.Client):
                     if moscow_now.time() > self._end_time:
                         continue  # Переходим к следующему дню
                     # Если уже отправлялось сегодня, переходим к следующему дню
-                    if self._last_mark_date == check_date:
+                    if self._last_mark_date == check_date or self._auto_failure_date == check_date:
                         continue
                 # Создаем naive datetime для корректного форматирования
                 next_time = self.moscow_tz.localize(datetime.combine(check_date, self._next_target_time))
@@ -330,9 +343,9 @@ class DiscordBot(discord.Client):
             _log.error("Ошибка при переподключении: %s", e)
     
     async def send_message_to_channel(self, channel_id: int, message_content: str,
-                                      *, progress=None, on_progress=None) -> bool:
+                                      *, progress=None, on_progress=None, can_send=None) -> bool:
         parts = [(text, []) for text in self._split_long_text(message_content)]
-        return await self._send_parts(channel_id, parts, progress, on_progress)
+        return await self._send_parts(channel_id, parts, progress, on_progress, can_send)
 
     async def send_message_with_files_to_channel(self, channel_id: int,
                                                 message_content: str, file_paths: list[str],
@@ -347,7 +360,7 @@ class DiscordBot(discord.Client):
         parts.extend((text, []) for text in text_parts[1:])
         return await self._send_parts(channel_id, parts, progress, on_progress)
 
-    async def _send_parts(self, channel_id, parts, progress=None, on_progress=None) -> bool:
+    async def _send_parts(self, channel_id, parts, progress=None, on_progress=None, can_send=None) -> bool:
         managed_delivery = progress is not None
         progress = progress if progress is not None else {}
         for attempt in range(3):
@@ -367,6 +380,8 @@ class DiscordBot(discord.Client):
                     text, paths = parts[index]
                     if index:
                         await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)
+                    if can_send and not can_send():
+                        return False
                     files = []
                     try:
                         for path in paths:
@@ -721,33 +736,53 @@ class DiscordBot(discord.Client):
         return True
 
     async def _send_scheduled_message(self) -> None:
-        """
-        Отправляет запланированное сообщение
-        """
-        current_moscow_time = datetime.now(self.moscow_tz)
-        
-        if self._can_send_mark(current_moscow_time):
-            _log.info("Отправка запланированного сообщения...")
-            
-            success = await self.send_message_to_channel(
-                channel_id=self._chat_channel_id,
-                message_content=self._chat_channel_message
-            )
-            self._last_mark_date = current_moscow_time.date()
+        now = datetime.now(self.moscow_tz)
+        if not self._can_send_mark(now):
+            return
+        if self._auto_attempt_date != now.date():
+            self._auto_attempt_date = now.date()
+            self._auto_attempts = 0
+            self._auto_delivery_progress = {}
+        day = now.date()
+        while self._auto_attempts < 3:
+            if not self._can_send_mark(datetime.now(self.moscow_tz)):
+                return
+            self._auto_attempts += 1
             self._save_settings()
-            
+            success = await self.send_message_to_channel(
+                channel_id=self._chat_channel_id, message_content=self._chat_channel_message,
+                progress=self._auto_delivery_progress, on_progress=self._save_settings,
+                can_send=lambda: self._can_send_mark(datetime.now(self.moscow_tz)),
+            )
             if success:
-                _log.info("Автоматическое сообщение успешно отправлено в %s МСК", 
-                         current_moscow_time.strftime('%H:%M:%S'))
-            else:
-                _log.error("Не удалось отправить запланированное сообщение")
-        else:
-            _log.info("Отправка отметок в чат отключена.")
+                self._last_mark_date = day
+                self._save_settings()
+                _log.info("Автоотметка успешно отправлена")
+                return
+            if self._auto_delivery_progress.get("uncertain"):
+                break
+            if self._auto_attempts < 3:
+                retry_time = datetime.now(self.moscow_tz) + timedelta(seconds=60)
+                if retry_time.time() > self._end_time:
+                    break
+                if not await self.wait_until_next_date(retry_time):
+                    return
+        self._auto_failure_date = day
+        self._save_settings()
+        _log.error("Автоотметка не доставлена; попытки на сегодня остановлены")
+        if self.on_auto_mark_failure:
+            try:
+                await self.on_auto_mark_failure(
+                    "⚠️ Автоотметка не доставлена. Попытки на сегодня остановлены. "
+                    "Проверьте канал, права и логи. При потере ответа последняя часть могла доставиться.")
+            except Exception:
+                _log.exception("Не удалось уведомить владельца об автоотметке")
 
     def _can_send_mark(self, now: datetime) -> bool:
         return (self._is_mark_enabled and self.is_weekday(now)
                 and self._start_time <= now.time() <= self._end_time
                 and self._last_mark_date != now.date()
+                and self._auto_failure_date != now.date()
                 and (self._wait_until_target_date is None or now >= self._wait_until_target_date))
 
     def _log_weekend_message(self, moscow_now: datetime) -> None:

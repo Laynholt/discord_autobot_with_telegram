@@ -132,6 +132,32 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.get_target_time_raw(), time(11, 15))
         self.assertEqual(restored._last_mark_date, bot._last_mark_date)
 
+    async def test_failed_auto_mark_is_retried_without_recording_success(self):
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
+        bot._next_target_time = time(10, 30)
+        bot.send_message_to_channel = AsyncMock(side_effect=[False, False, True])
+        bot.on_auto_mark_failure = AsyncMock()
+        with patch.object(discord_module, "datetime", Clock):
+            Clock.current = bot.moscow_tz.localize(datetime(2026, 10, 9, 11))
+            bot.wait_until_next_date = AsyncMock(return_value=True)
+            await bot._send_scheduled_message()
+        self.assertEqual(bot.send_message_to_channel.await_count, 3)
+        self.assertEqual(bot._last_mark_date, Clock.current.date())
+        bot.on_auto_mark_failure.assert_not_awaited()
+
+    async def test_exhausted_auto_retries_notify_once_and_do_not_mark_success(self):
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
+        bot.send_message_to_channel = AsyncMock(return_value=False)
+        bot.on_auto_mark_failure = AsyncMock()
+        with patch.object(discord_module, "datetime", Clock):
+            Clock.current = bot.moscow_tz.localize(datetime(2026, 10, 9, 11))
+            bot.wait_until_next_date = AsyncMock(return_value=True)
+            await bot._send_scheduled_message()
+            await bot._send_scheduled_message()
+        self.assertEqual(bot.send_message_to_channel.await_count, 3)
+        self.assertIsNone(bot._last_mark_date)
+        bot.on_auto_mark_failure.assert_awaited_once()
+
     async def test_telegram_output_is_bounded_and_unparsed(self):
         c = self.controller
         output = AsyncMock()

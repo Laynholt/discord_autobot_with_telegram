@@ -87,6 +87,7 @@ class TelegramBotController:
         
         # Путь к файлу с данными отложенных сообщений
         self.data_file = self.bot_data_dir / "delayed_messages.json"
+        self.discord_bot.on_auto_mark_failure = self.notify_auto_mark_failure
         
         # Задачи для отложенных сообщений
         self.delayed_tasks: dict[int, asyncio.Task] = {}
@@ -1935,6 +1936,9 @@ class TelegramBotController:
             except Exception:
                 _log.exception("Не удалось уведомить о восстановленных сообщениях")
         await self.dp.start_polling(self.bot)
+
+    async def notify_auto_mark_failure(self, text: str):
+        await self.send_text(self.bot.send_message, self.owner_id, text)
     
     async def stop(self):
         """Остановка бота"""

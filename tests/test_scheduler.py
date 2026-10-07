@@ -27,7 +27,7 @@ async def check_scheduler():
         bot.wait_until_target_day = 5
         delivered = asyncio.Event()
 
-        async def deliver(channel_id, message_content):
+        async def deliver(channel_id, message_content, **kwargs):
             assert (channel_id, message_content) == (1, "+")
             delivered.set()
             return True
@@ -53,7 +53,7 @@ async def check_scheduler():
         Clock.current = tz.localize(datetime(2026, 10, 5, 10, 30, 0, 1000))
         sent = []
 
-        async def send(channel_id, message_content):
+        async def send(channel_id, message_content, **kwargs):
             sent.append((channel_id, message_content))
             return True
 
