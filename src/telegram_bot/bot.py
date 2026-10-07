@@ -91,6 +91,7 @@ class TelegramBotController:
         
         # Задачи для отложенных сообщений
         self.delayed_tasks: dict[int, asyncio.Task] = {}
+        self._polling_task = None
         # Последовательная отправка нужна, чтобы сообщения с одинаковым временем
         # уходили строго в порядке добавления.
         self._delayed_send_lock = asyncio.Lock()
@@ -1935,7 +1936,9 @@ class TelegramBotController:
                     "Откройте отложенные сообщения для повтора, переноса или удаления.")
             except Exception:
                 _log.exception("Не удалось уведомить о восстановленных сообщениях")
-        await self.dp.start_polling(self.bot)
+        self._polling_task = asyncio.create_task(self.dp.start_polling(
+            self.bot, handle_signals=False, close_bot_session=False), name="telegram_polling")
+        await asyncio.shield(self._polling_task)
 
     async def notify_auto_mark_failure(self, text: str):
         await self.send_text(self.bot.send_message, self.owner_id, text)
@@ -1949,22 +1952,28 @@ class TelegramBotController:
         except OSError:
             _log.exception("Не удалось сохранить очередь при остановке")
         
-        # Отменяем все отложенные задачи
-        for task in self.delayed_tasks.values():
+        tasks = list(self.delayed_tasks.values())
+        for task in tasks:
             task.cancel()
-        
-        # Останавливаем диспетчер
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.delayed_tasks.clear()
+        polling = self._polling_task
         try:
-            await self.dp.stop_polling()
-        except Exception as e:
-            _log.error(f"Ошибка при остановке диспетчера: {e}")
-        
-        # Закрываем сессию бота
-        try:
+            if polling is not None and not polling.done():
+                try:
+                    await asyncio.wait_for(self.dp.stop_polling(), timeout=3)
+                except (RuntimeError, TimeoutError):
+                    polling.cancel()
+            if polling is not None:
+                await asyncio.gather(polling, return_exceptions=True)
+            # aiogram owns these per-update tasks; drain them before closing its session.
+            updates = list(self.dp._handle_update_tasks)
+            for task in updates:
+                task.cancel()
+            await asyncio.gather(*updates, return_exceptions=True)
+        finally:
+            self.discord_bot.on_auto_mark_failure = None
             await self.bot.session.close()
-        except Exception as e:
-            _log.error(f"Ошибка при закрытии сессии: {e}")
-            
         _log.info("Telegram бот остановлен")
 
 

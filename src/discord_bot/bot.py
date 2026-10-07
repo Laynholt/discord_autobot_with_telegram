@@ -48,6 +48,7 @@ class DiscordBot(discord.Client):
         self._settings_file = None
         # Флаг для предотвращения множественного запуска планировщика
         self.scheduler_running: bool = False
+        self._scheduler_task = None
         # Часовой пояс Москвы для корректной работы с местным временем
         self.moscow_tz: pytz.BaseTzInfo = pytz.timezone('Europe/Moscow')
         
@@ -318,8 +319,16 @@ class DiscordBot(discord.Client):
         # Запускаем планировщик только один раз
         if not self.scheduler_running:
             # Создаем асинхронную задачу для планировщика сообщений
-            self.loop.create_task(self.message_scheduler())
+            self._scheduler_task = self.loop.create_task(self.message_scheduler())
             self.scheduler_running = True
+
+    async def close(self):
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+            await asyncio.gather(self._scheduler_task, return_exceptions=True)
+            self._scheduler_task = None
+            self.scheduler_running = False
+        await super().close()
     
     async def on_error(self, event, *args, **kwargs):
         """Обработчик ошибок Discord бота"""
