@@ -45,7 +45,7 @@ class DiscordBot(discord.Client):
             private_channel_id: int, (int): ID личных сообщений для отправки отложенного сообщения
         """
         super().__init__(*args, **kwargs)
-        self._settings_file = None
+        self._settings_file = Path(settings_file) if settings_file is not None else None
         # Флаг для предотвращения множественного запуска планировщика
         self.scheduler_running: bool = False
         self._scheduler_task = None
@@ -74,13 +74,15 @@ class DiscordBot(discord.Client):
         
         self._next_target_time: time | None = None
         self._next_target_time_locked: time | None = None
-        self.regenerate_next_target_time()
-        self._settings_file = Path(settings_file) if settings_file is not None else None
-        if self._settings_file is not None:
-            if self._settings_file.exists():
-                self._load_settings()
-            else:
-                self._save_settings()
+        if self._settings_file is not None and self._settings_file.exists():
+            self._load_settings()
+            _log.info("Настройки автоотметки восстановлены из %s; время: %s МСК; статус: %s",
+                      self._settings_file, self._next_target_time.strftime('%H:%M:%S'),
+                      "включена" if self._is_mark_enabled else "отключена")
+        else:
+            self.regenerate_next_target_time()
+            _log.info("Создано расписание автоотметки; время: %s МСК",
+                      self._next_target_time.strftime('%H:%M:%S'))
 
     def _save_settings(self):
         if self._settings_file is not None:

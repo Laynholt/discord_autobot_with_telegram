@@ -125,12 +125,38 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         bot.set_next_target_time_once(time(11, 15))
         bot._last_mark_date = datetime.now(bot.moscow_tz).date()
         bot._save_settings()
-        restored = discord_module.DiscordBot(1, 2, settings_file=path)
+        before_restart = path.read_bytes()
+        with patch.object(discord_module.random, "randint") as random_time:
+            with self.assertLogs("discord_bot.bot", level="INFO") as logs:
+                restored = discord_module.DiscordBot(1, 2, settings_file=path)
+            random_time.assert_not_called()
+        self.assertEqual(path.read_bytes(), before_restart)
+        self.assertTrue(any("восстановлены" in line and "11:15:00 МСК" in line
+                            and "отключена" in line and str(path) in line for line in logs.output))
         self.assertFalse(restored.should_send_mark_message)
         self.assertEqual(restored.chat_channel_message, "custom")
         self.assertEqual(restored._wait_until_target_date, bot._wait_until_target_date)
         self.assertEqual(restored.get_target_time_raw(), time(11, 15))
         self.assertEqual(restored._last_mark_date, bot._last_mark_date)
+
+    async def test_first_start_generates_and_saves_time_once(self):
+        path = self.controller.bot_data_dir / "auto_mark.json"
+        with patch.object(discord_module.random, "randint", return_value=11 * 3600 + 54 * 60 + 37) as random_time:
+            with self.assertLogs("discord_bot.bot", level="INFO") as logs:
+                bot = discord_module.DiscordBot(1, 2, settings_file=path)
+            random_time.assert_called_once()
+        self.assertEqual(bot.get_target_time_raw(), time(11, 54, 37))
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["next_time"], "11:54:37")
+        self.assertTrue(any("Создано расписание" in line and "11:54:37 МСК" in line for line in logs.output))
+
+    async def test_invalid_saved_settings_are_not_replaced_by_random_schedule(self):
+        path = self.controller.bot_data_dir / "auto_mark.json"
+        path.write_text("{broken", encoding="utf-8")
+        with patch.object(discord_module.random, "randint") as random_time:
+            with self.assertRaises(ValueError):
+                discord_module.DiscordBot(1, 2, settings_file=path)
+            random_time.assert_not_called()
+        self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
 
     async def test_failed_auto_mark_is_retried_without_recording_success(self):
         bot = discord_module.DiscordBot(1, 2, settings_file=None)
