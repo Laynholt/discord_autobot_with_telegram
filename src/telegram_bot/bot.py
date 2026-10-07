@@ -1738,6 +1738,12 @@ class TelegramBotController:
         if message_id not in self.delayed_messages:
             await callback.answer("❌ Сообщение не найдено")
             return
+
+        try:
+            self.save_delayed_messages()
+        except OSError:
+            await callback.answer("❌ Не удалось сохранить. Повторите позже.")
+            return
         
         await state.clear()
         

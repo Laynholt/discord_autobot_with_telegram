@@ -113,3 +113,16 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(Path(first).read_text(), "1")
         self.assertEqual(Path(second).read_text(), "2")
+
+    async def test_attachment_save_survives_reload(self):
+        c = self.controller
+        job = self.job(True)
+        job.date_time += timedelta(days=1)
+        callback = SimpleNamespace(from_user=SimpleNamespace(id=1), data="save_attachments_1",
+                                   answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
+        state = SimpleNamespace(clear=AsyncMock())
+        await c.save_attachments_callback(callback, state)
+        c.delayed_messages.clear()
+        c.load_delayed_messages()
+        self.assertEqual(len(c.delayed_messages[1].attachments), 1)
+        state.clear.assert_awaited_once()
