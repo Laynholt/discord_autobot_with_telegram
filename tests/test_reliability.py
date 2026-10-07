@@ -90,6 +90,29 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.next_message_id, 2)
         state.clear.assert_not_awaited()
 
+    async def test_telegram_output_is_bounded_and_unparsed(self):
+        c = self.controller
+        output = AsyncMock()
+        await c.send_text(output, "`[*_" + "😀" * 4096, parse_mode="Markdown")
+        sent = output.await_args.args[0]
+        self.assertLessEqual(len(sent.encode("utf-16-le")) // 2, 4096)
+        self.assertTrue(sent.startswith("`[*_"))
+        self.assertIsNone(output.await_args.kwargs.get("parse_mode"))
+
+    async def test_queue_list_has_pages_for_large_queues(self):
+        c = self.controller
+        job = self.job()
+        for i in range(2, 100):
+            c.delayed_messages[i] = DelayedMessage(i, "`[*_" * 1024, job.date_time, job.created_at)
+        output = AsyncMock()
+        callback = SimpleNamespace(data="view_delayed_messages", from_user=SimpleNamespace(id=1),
+            message=SimpleNamespace(edit_text=output), answer=AsyncMock())
+        await c.view_delayed_messages_callback(callback)
+        markup = output.await_args.kwargs["reply_markup"]
+        buttons = [b for row in markup.inline_keyboard for b in row]
+        self.assertLessEqual(len(buttons), 34)
+        self.assertTrue(any(b.callback_data == "view_delayed_messages_1" for b in buttons))
+
     async def test_missing_attachment_prevents_any_delivery(self):
         bot = discord_module.DiscordBot(1, 2)
         send = AsyncMock()
