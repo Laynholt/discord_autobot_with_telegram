@@ -12,3 +12,4 @@ wheels/
 .env
 bot_data/
 CLAUDE.md
+/docs/
