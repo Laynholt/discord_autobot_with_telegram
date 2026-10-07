@@ -1956,6 +1956,7 @@ async def run_telegram_bot(bot_token: str, owner_id: int | str, discord_bot: Dis
         raise  # Передаем CancelledError дальше
     except Exception as e:
         _log.exception(f"Критическая ошибка в Telegram боте: {e}")
+        raise
     finally:
         # Корректно останавливаем бота
         if telegram_bot:
