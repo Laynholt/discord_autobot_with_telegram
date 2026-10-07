@@ -99,14 +99,14 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         state.clear.assert_not_awaited()
 
     async def test_random_time_at_end_of_window(self):
-        bot = discord_module.DiscordBot(1, 2)
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
         for second in (58, 59):
             value = bot.get_random_time_in_range(time(11, 59, second), time(12))
             self.assertGreaterEqual(value, time(11, 59, second))
             self.assertLessEqual(value, time(12))
 
     async def test_auto_mark_rechecks_window_after_waking(self):
-        bot = discord_module.DiscordBot(1, 2)
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
         bot._next_target_time = time(11)
         bot.send_message_to_channel = AsyncMock(return_value=True)
         tz = bot.moscow_tz
@@ -115,6 +115,22 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 Clock.current = tz.localize(timestamp)
                 await bot._handle_workday_message_sending(Clock.current.replace(hour=10, minute=30))
             bot.send_message_to_channel.assert_not_awaited()
+
+    async def test_auto_settings_survive_restart(self):
+        path = self.controller.bot_data_dir / "auto_mark.json"
+        bot = discord_module.DiscordBot(1, 2, settings_file=path)
+        bot.disable_sending_in_chat()
+        bot.chat_channel_message = "custom"
+        bot.wait_until_target_day = 15
+        bot.set_next_target_time_once(time(11, 15))
+        bot._last_mark_date = datetime.now(bot.moscow_tz).date()
+        bot._save_settings()
+        restored = discord_module.DiscordBot(1, 2, settings_file=path)
+        self.assertFalse(restored.should_send_mark_message)
+        self.assertEqual(restored.chat_channel_message, "custom")
+        self.assertEqual(restored._wait_until_target_date, bot._wait_until_target_date)
+        self.assertEqual(restored.get_target_time_raw(), time(11, 15))
+        self.assertEqual(restored._last_mark_date, bot._last_mark_date)
 
     async def test_telegram_output_is_bounded_and_unparsed(self):
         c = self.controller
@@ -140,7 +156,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(b.callback_data == "view_delayed_messages_1" for b in buttons))
 
     async def test_missing_attachment_prevents_any_delivery(self):
-        bot = discord_module.DiscordBot(1, 2)
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
         send = AsyncMock()
         bot.get_channel = lambda _: SimpleNamespace(send=send)
         missing = str(self.controller.attachments_dir / "missing.txt")
@@ -148,7 +164,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         send.assert_not_awaited()
 
     async def test_partial_delivery_retry_skips_confirmed_parts(self):
-        bot = discord_module.DiscordBot(1, 2)
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
         delivered = []
         failed_once = False
         async def send(*args, **kwargs):
@@ -168,7 +184,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         c = self.controller
         job = self.job(True)
         job.text = "x" * 2100
-        bot = discord_module.DiscordBot(1, 2)
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
         paths = []
         for index in range(11):
             path = c.attachments_dir / str(index)
@@ -244,7 +260,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.delayed_tasks, {})
 
     async def test_channel_cache_miss_fetches_from_discord(self):
-        bot = discord_module.DiscordBot(1, 2)
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
         bot.wait_until_ready = AsyncMock()
         bot.get_channel = lambda _: None
         send = AsyncMock()

@@ -22,7 +22,7 @@ async def check_scheduler():
     with patch.object(module, "datetime", Clock):
         tz = module.pytz.timezone("Europe/Moscow")
         Clock.current = tz.localize(datetime(2026, 9, 30, 11, 41, 7))
-        bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2)
+        bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2, settings_file=None)
         bot.set_next_target_time_once(time(11))
         bot.wait_until_target_day = 5
         delivered = asyncio.Event()
@@ -47,7 +47,7 @@ async def check_scheduler():
 
         # The date set in September must still be October 5 after waking at 10:30.
         Clock.current = tz.localize(datetime(2026, 9, 30, 11, 41, 7))
-        bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2)
+        bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2, settings_file=None)
         bot.set_next_target_time_once(time(11))
         bot.wait_until_target_day = 5
         Clock.current = tz.localize(datetime(2026, 10, 5, 10, 30, 0, 1000))
@@ -93,7 +93,7 @@ async def check_scheduler():
 
         # Changing settings during today's wait must cancel that send, then resume safely.
         Clock.current = tz.localize(datetime(2026, 9, 30, 10, 45))
-        bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2)
+        bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2, settings_file=None)
         bot.set_next_target_time_once(time(11))
         waits = asyncio.Queue()
         original_wait = bot.wait_until_next_date
@@ -135,7 +135,7 @@ async def check_scheduler():
             (datetime(2026, 10, 5, 10, 30, 0, 1000), 5, "11:00:00 - 05.10.2026"),
         ):
             Clock.current = tz.localize(now)
-            bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2)
+            bot = module.DiscordBot(chat_channel_id=1, private_channel_id=2, settings_file=None)
             bot.set_next_target_time_once(time(11))
             bot.wait_until_target_day = day
             assert bot.next_target_time == expected, (now, bot.next_target_time)

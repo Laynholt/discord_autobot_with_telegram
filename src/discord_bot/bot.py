@@ -5,10 +5,11 @@ import logging
 import asyncio
 import discord
 import calendar
+import json
 from pathlib import Path
 from datetime import date, datetime, time, timedelta
 
-from utils import load_env_config
+from utils import load_env_config, atomic_write_json
 
 _log = logging.getLogger(__name__)
 
@@ -34,7 +35,8 @@ class DiscordBot(discord.Client):
     в рабочие дни в случайное время
     """
     
-    def __init__(self, chat_channel_id: int, private_channel_id: int, *args, **kwargs):
+    def __init__(self, chat_channel_id: int, private_channel_id: int, *args,
+                 settings_file: Path | None = Path("bot_data/auto_mark.json"), **kwargs):
         """
         Инициализация клиента с дополнительными параметрами для планировщика
         
@@ -43,6 +45,7 @@ class DiscordBot(discord.Client):
             private_channel_id: int, (int): ID личных сообщений для отправки отложенного сообщения
         """
         super().__init__(*args, **kwargs)
+        self._settings_file = None
         # Флаг для предотвращения множественного запуска планировщика
         self.scheduler_running: bool = False
         # Часовой пояс Москвы для корректной работы с местным временем
@@ -65,6 +68,53 @@ class DiscordBot(discord.Client):
         self._next_target_time: time | None = None
         self._next_target_time_locked: time | None = None
         self.regenerate_next_target_time()
+        self._settings_file = Path(settings_file) if settings_file is not None else None
+        if self._settings_file is not None:
+            if self._settings_file.exists():
+                self._load_settings()
+            else:
+                self._save_settings()
+
+    def _save_settings(self):
+        if self._settings_file is not None:
+            atomic_write_json(self._settings_file, {
+                "enabled": self._is_mark_enabled,
+                "text": self._chat_channel_message,
+                "wait_day": self._wait_until_target_day,
+                "wait_date": self._wait_until_target_date.isoformat() if self._wait_until_target_date else None,
+                "next_time": self._next_target_time.isoformat(),
+                "last_mark_date": self._last_mark_date.isoformat() if self._last_mark_date else None,
+            })
+
+    def _load_settings(self):
+        data = json.loads(self._settings_file.read_text(encoding="utf-8"))
+        next_time = time.fromisoformat(data["next_time"])
+        wait_day = data.get("wait_day")
+        wait_date = datetime.fromisoformat(data["wait_date"]) if data.get("wait_date") else None
+        if (type(data["enabled"]) is not bool or not isinstance(data["text"], str)
+                or not data["text"].strip() or not self._start_time <= next_time <= self._end_time
+                or (wait_day is not None and (type(wait_day) is not int or not 1 <= wait_day <= 31))
+                or ((wait_day is None) != (wait_date is None))
+                or (wait_date is not None and wait_date.tzinfo is None)):
+            raise ValueError(f"Некорректные настройки автоотметки: {self._settings_file}")
+        self._is_mark_enabled = data["enabled"]
+        self._chat_channel_message = data["text"]
+        self._next_target_time = next_time
+        self._wait_until_target_day = wait_day
+        self._wait_until_target_date = wait_date
+        self._last_mark_date = date.fromisoformat(data["last_mark_date"]) if data.get("last_mark_date") else None
+
+    def _update_settings(self, **values):
+        previous = {key: getattr(self, key) for key in values}
+        try:
+            for key, value in values.items():
+                setattr(self, key, value)
+            self._save_settings()
+        except Exception:
+            for key, value in previous.items():
+                setattr(self, key, value)
+            raise
+        self._schedule_changed.set()
 
     @property
     def wait_until_target_day(self) -> int | None:
@@ -78,12 +128,11 @@ class DiscordBot(discord.Client):
             raise TypeError("День должен быть целым числом или None!")
         if value is not None and not 1 <= value <= 31:
             raise ValueError("День должен быть в диапазоне 1-31")
+        previous_day = self._wait_until_target_day
         self._wait_until_target_day = value
-        self._wait_until_target_date = (
-            self._calculate_wait_until_target_date(datetime.now(self.moscow_tz))
-            if value is not None else None
-        )
-        self._schedule_changed.set()
+        target = self._calculate_wait_until_target_date(datetime.now(self.moscow_tz)) if value is not None else None
+        self._wait_until_target_day = previous_day
+        self._update_settings(_wait_until_target_day=value, _wait_until_target_date=target)
 
     @property
     def should_send_mark_message(self) -> bool:
@@ -92,13 +141,11 @@ class DiscordBot(discord.Client):
 
     def enable_sending_in_chat(self) -> None:
         """Включить автоотправку отметок в чате."""
-        self._is_mark_enabled = True
-        self._schedule_changed.set()
+        self._update_settings(_is_mark_enabled=True)
 
     def disable_sending_in_chat(self) -> None:
         """Выключить автоотправку отметок в чате."""
-        self._is_mark_enabled = False
-        self._schedule_changed.set()
+        self._update_settings(_is_mark_enabled=False)
 
     @property
     def chat_channel_message(self) -> str:
@@ -108,7 +155,9 @@ class DiscordBot(discord.Client):
     @chat_channel_message.setter
     def chat_channel_message(self, message: str) -> None:
         """Установить сообщение, которое отправляется при автоотправке."""
-        self._chat_channel_message = message
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("Текст автоотметки не может быть пустым")
+        self._update_settings(_chat_channel_message=message)
 
     @property
     def next_target_time(self) -> str:
@@ -217,8 +266,7 @@ class DiscordBot(discord.Client):
             )
         
         # Генерируем новое случайное время
-        self._next_target_time = self._initialize_next_target_time(_start_datetime)
-        self._schedule_changed.set()
+        self._update_settings(_next_target_time=self._initialize_next_target_time(_start_datetime))
 
     def set_next_target_time_once(self, next_time: time) -> None:
         """
@@ -235,8 +283,7 @@ class DiscordBot(discord.Client):
                 f"{self._start_time.strftime('%H:%M:%S')} - {self._end_time.strftime('%H:%M:%S')} МСК"
             )
 
-        self._next_target_time = next_time
-        self._schedule_changed.set()
+        self._update_settings(_next_target_time=next_time)
         _log.info("Следующее время автоотправки вручную установлено на %s", next_time.strftime("%H:%M:%S"))
 
     def get_target_time_raw(self) -> time:
@@ -608,8 +655,7 @@ class DiscordBot(discord.Client):
     async def _handle_wait_until_target_day(self) -> None:
         """Ожидает сохраненную дату, сохраняя настройку до завершения ожидания."""
         if await self.wait_until_next_date(self._wait_until_target_date):
-            self._wait_until_target_day = None
-            self._wait_until_target_date = None
+            self._update_settings(_wait_until_target_day=None, _wait_until_target_date=None)
 
     async def _process_daily_schedule(self, moscow_now: datetime, start_datetime: datetime, end_datetime: datetime) -> None:
         """
@@ -671,6 +717,7 @@ class DiscordBot(discord.Client):
         
         # Генерируем время для следующего дня и выходим
         self._next_target_time = self._initialize_next_target_time(start_datetime)
+        self._save_settings()
         return True
 
     async def _send_scheduled_message(self) -> None:
@@ -687,6 +734,7 @@ class DiscordBot(discord.Client):
                 message_content=self._chat_channel_message
             )
             self._last_mark_date = current_moscow_time.date()
+            self._save_settings()
             
             if success:
                 _log.info("Автоматическое сообщение успешно отправлено в %s МСК", 

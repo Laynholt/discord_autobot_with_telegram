@@ -503,7 +503,14 @@ class TelegramBotController:
         ):
             await self.cleanup_creating_message_files(state)
             await state.clear()
-        return await handler(event, data)
+        try:
+            return await handler(event, data)
+        except (OSError, ValueError) as error:
+            _log.exception("Изменения не применены")
+            if callback_data is not None:
+                await event.answer(self.text_preview(f"❌ Изменения не сохранены: {error}", 200))
+            else:
+                await self.send_text(event.answer, f"❌ Изменения не сохранены: {error}")
     
     def get_main_menu_keyboard(self) -> InlineKeyboardMarkup:
         """Создает клавиатуру главного меню"""
