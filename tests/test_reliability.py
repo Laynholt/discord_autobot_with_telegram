@@ -15,6 +15,14 @@ import telegram_bot.bot as telegram_module
 import discord_bot.bot as discord_module
 
 
+class Clock(datetime):
+    current = None
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.current
+
+
 class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -96,6 +104,17 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             value = bot.get_random_time_in_range(time(11, 59, second), time(12))
             self.assertGreaterEqual(value, time(11, 59, second))
             self.assertLessEqual(value, time(12))
+
+    async def test_auto_mark_rechecks_window_after_waking(self):
+        bot = discord_module.DiscordBot(1, 2)
+        bot._next_target_time = time(11)
+        bot.send_message_to_channel = AsyncMock(return_value=True)
+        tz = bot.moscow_tz
+        with patch.object(discord_module, "datetime", Clock):
+            for timestamp in (datetime(2026, 10, 9, 12, 1), datetime(2026, 10, 10, 11, 30)):
+                Clock.current = tz.localize(timestamp)
+                await bot._handle_workday_message_sending(Clock.current.replace(hour=10, minute=30))
+            bot.send_message_to_channel.assert_not_awaited()
 
     async def test_telegram_output_is_bounded_and_unparsed(self):
         c = self.controller

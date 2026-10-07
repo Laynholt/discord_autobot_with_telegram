@@ -663,6 +663,10 @@ class DiscordBot(discord.Client):
                 return False
         
         # Отправляем сообщение
+        current_moscow_time = datetime.now(self.moscow_tz)
+        if current_moscow_time.date() != start_datetime.date() or not self._can_send_mark(current_moscow_time):
+            _log.info("Автоотметка пропущена: рабочее окно или настройки изменились")
+            return True
         await self._send_scheduled_message()
         
         # Генерируем время для следующего дня и выходим
@@ -675,7 +679,7 @@ class DiscordBot(discord.Client):
         """
         current_moscow_time = datetime.now(self.moscow_tz)
         
-        if self._is_mark_enabled:
+        if self._can_send_mark(current_moscow_time):
             _log.info("Отправка запланированного сообщения...")
             
             success = await self.send_message_to_channel(
@@ -691,6 +695,12 @@ class DiscordBot(discord.Client):
                 _log.error("Не удалось отправить запланированное сообщение")
         else:
             _log.info("Отправка отметок в чат отключена.")
+
+    def _can_send_mark(self, now: datetime) -> bool:
+        return (self._is_mark_enabled and self.is_weekday(now)
+                and self._start_time <= now.time() <= self._end_time
+                and self._last_mark_date != now.date()
+                and (self._wait_until_target_date is None or now >= self._wait_until_target_date))
 
     def _log_weekend_message(self, moscow_now: datetime) -> None:
         """
