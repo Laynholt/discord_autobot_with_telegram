@@ -21,6 +21,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.formatting import Text, Bold, Italic, Code
 from aiogram.exceptions import TelegramBadRequest
 
 from discord_bot import DiscordBot
@@ -438,7 +439,20 @@ class TelegramBotController:
         args = list(args)
         index = 1 if len(args) > 1 else 0
         if args:
-            args[index] = self.text_preview(args[index])
+            content = args[index]
+            if isinstance(content, Text):
+                raw_text, entities = content.render()
+                preview = self.text_preview(raw_text)
+                # Entity offsets use UTF-16; the added ellipsis stays unformatted.
+                prefix = preview[:-1] if preview != raw_text else preview
+                end = len(prefix.encode("utf-16-le")) // 2
+                kwargs["entities"] = [
+                    entity.model_copy(update={"length": min(entity.length, end - entity.offset)})
+                    for entity in entities if entity.offset < end and entity.length > 0
+                ]
+                args[index] = preview
+            else:
+                args[index] = self.text_preview(content)
         kwargs["parse_mode"] = None
         return await method(*args, **kwargs)
     
@@ -607,12 +621,15 @@ class TelegramBotController:
         next_send_time = self.discord_bot.next_target_time
         
         await self.send_text(callback.message.edit_text,
-            f"🔔 *Ежедневная автоотметка*\n\n"
-            f"Автоматическая отправка сообщений в рабочие дни (пн-пт) с 10:30 до 12:00 МСК\n\n"
-            f"Текущий статус: _{status}_\n"
-            f"Следующая отправка: _{next_send_time}_",
+            Text(
+                "🔔 ",
+                Bold("Ежедневная автоотметка"),
+                "\n\nАвтоматическая отправка сообщений в рабочие дни (пн-пт) с 10:30 до 12:00 МСК\n\nТекущий статус: ",
+                Italic(status),
+                "\nСледующая отправка: ",
+                Italic(next_send_time),
+            ),
             reply_markup=self.get_auto_mark_menu_keyboard(),
-            parse_mode="Markdown"
         )
         await callback.answer()
     
@@ -636,10 +653,13 @@ class TelegramBotController:
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="auto_mark_menu"))
         
         await self.send_text(callback.message.edit_text,
-            f"🔔 *Автоотметка {action}!*\n\n"
-            f"Текущий статус: _{status}_",
+            Text(
+                "🔔 ",
+                Bold("Автоотметка ", action, "!"),
+                "\n\nТекущий статус: ",
+                Italic(status),
+            ),
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await callback.answer(f"Автоотметка {action}!")
         _log.info(f"Автоотметка {action} пользователем {callback.from_user.id}")
@@ -687,12 +707,15 @@ class TelegramBotController:
 
         await state.clear()
         await self.send_text(message.answer,
-            f"✅ *Следующая автоотметка обновлена!*\n\n"
-            f"Одноразово установлено время: `{parsed_time.strftime('%H:%M:%S')}`\n"
-            f"Далее время снова будет генерироваться случайно.\n\n"
-            f"Следующая отправка: _{self.discord_bot.next_target_time}_",
+            Text(
+                "✅ ",
+                Bold("Следующая автоотметка обновлена!"),
+                "\n\nОдноразово установлено время: ",
+                Code(parsed_time.strftime('%H:%M:%S')),
+                "\nДалее время снова будет генерироваться случайно.\n\nСледующая отправка: ",
+                Italic(self.discord_bot.next_target_time),
+            ),
             reply_markup=self.get_back_keyboard("auto_mark_menu"),
-            parse_mode="Markdown"
         )
         _log.info(
             "Следующее время автоотметки вручную установлено пользователем %s: %s",
@@ -719,13 +742,17 @@ class TelegramBotController:
         # Обновляем кнопки
         try:
             await self.send_text(callback.message.edit_text,
-                f"🔔 *Ежедневная автоотметка*\n\n"
-                f"Автоматическая отправка сообщений в рабочие дни (пн-пт) с 10:30 до 12:00 МСК\n\n"
-                f"Текущий статус: _{status}_\n"
-                f"Следующая отправка: _{next_send_time}_\n\n"
-                f"🎲 *Время перегенерировано!*",
+                Text(
+                    "🔔 ",
+                    Bold("Ежедневная автоотметка"),
+                    "\n\nАвтоматическая отправка сообщений в рабочие дни (пн-пт) с 10:30 до 12:00 МСК\n\nТекущий статус: ",
+                    Italic(status),
+                    "\nСледующая отправка: ",
+                    Italic(next_send_time),
+                    "\n\n🎲 ",
+                    Bold("Время перегенерировано!"),
+                ),
                 reply_markup=self.get_auto_mark_menu_keyboard(),
-                parse_mode="Markdown"
             )
             await callback.answer("🎲 Время отправки перегенерировано!")
             _log.info(f"Время отправки перегенерировано пользователем {callback.from_user.id}: {old_time} → {next_send_time}")
@@ -751,11 +778,13 @@ class TelegramBotController:
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu"))
         
         await self.send_text(callback.message.edit_text,
-            f"💬 *Текст ежедневной автоотметки*\n\n"
-            f"Сообщение, которое автоматически отправляется в рабочие дни\n\n"
-            f"Текущий текст:\n`{current_message}`",
+            Text(
+                "💬 ",
+                Bold("Текст ежедневной автоотметки"),
+                "\n\nСообщение, которое автоматически отправляется в рабочие дни\n\nТекущий текст:\n",
+                Code(current_message),
+            ),
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await callback.answer()
     
@@ -782,11 +811,14 @@ class TelegramBotController:
         
         await state.clear()
         await self.send_text(message.answer,
-            f"✅ *Текст сообщения обновлен!*\n\n"
-            f"Новый текст:\n{self.text_preview(new_text, 1000)}\n\n"
-            f"Он применяется к следующей ещё не начатой автоотметке.",
+            Text(
+                "✅ ",
+                Bold("Текст сообщения обновлен!"),
+                "\n\nНовый текст:\n",
+                self.text_preview(new_text, 1000),
+                "\n\nОн применяется к следующей ещё не начатой автоотметке.",
+            ),
             reply_markup=self.get_back_keyboard("message_settings_menu"),
-            parse_mode="Markdown"
         )
         _log.info(f"Текст сообщения изменен на: {new_text}")
     
@@ -808,11 +840,13 @@ class TelegramBotController:
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu"))
         
         await self.send_text(callback.message.edit_text,
-            f"📅 *Отложить автоотметку до дня*\n\n"
-            f"Приостановить ежедневную автоотметку до указанного числа месяца\n\n"
-            f"Текущий день ожидания: _{day_text}_",
+            Text(
+                "📅 ",
+                Bold("Отложить автоотметку до дня"),
+                "\n\nПриостановить ежедневную автоотметку до указанного числа месяца\n\nТекущий день ожидания: ",
+                Italic(day_text),
+            ),
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await callback.answer()
     
@@ -846,10 +880,14 @@ class TelegramBotController:
             await state.clear()
             
             await self.send_text(message.answer,
-                f"✅ *Автоотметка отложена!*\n\n"
-                f"Ежедневная автоотметка приостановлена до {day} числа.",
+                Text(
+                    "✅ ",
+                    Bold("Автоотметка отложена!"),
+                    "\n\nЕжедневная автоотметка приостановлена до ",
+                    day,
+                    " числа.",
+                ),
                 reply_markup=self.get_back_keyboard("wait_day_menu"),
-                parse_mode="Markdown"
             )
             _log.info(f"День ожидания установлен на: {day}")
             
@@ -867,10 +905,8 @@ class TelegramBotController:
         self.discord_bot.wait_until_target_day = None
         
         await self.send_text(callback.message.edit_text,
-            f"✅ *Автоотметка возобновлена!*\n\n"
-            f"Ежедневная автоотметка возобновлена в обычном режиме.",
+            Text("✅ ", Bold("Автоотметка возобновлена!"), "\n\nЕжедневная автоотметка возобновлена в обычном режиме."),
             reply_markup=self.get_back_keyboard("wait_day_menu"),
-            parse_mode="Markdown"
         )
         await callback.answer("Автоотметка возобновлена!")
         _log.info("День ожидания очищен")
@@ -892,10 +928,13 @@ class TelegramBotController:
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu"))
         
         await self.send_text(callback.message.edit_text,
-            f"⏰ *Отложенные сообщения*\n\n"
-            f"Количество активных: {count}",
+            Text(
+                "⏰ ",
+                Bold("Отложенные сообщения"),
+                "\n\nКоличество активных: ",
+                count,
+            ),
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await callback.answer()
     
@@ -927,18 +966,39 @@ class TelegramBotController:
         builder.row(InlineKeyboardButton(text="❌ Отменить создание", callback_data="cancel_creating_message"))
         
         await self.send_text(message.answer,
-            f"📝 Текст сохранен:\n{self.text_preview(text, 1000)}\n\n"
-            f"⏰ Теперь введите дату и время отправки.\n\n"
-            f"*Форматы:*\n"
-            f"• `ЧЧ:ММ` или `ЧЧ:ММ:СС` - только время (сегодня или завтра)\n"
-            f"• `ДД.ММ ЧЧ:ММ` или `ДД.ММ ЧЧ:ММ:СС` - дата и время текущего года\n"
-            f"• `ДД.ММ.ГГГГ ЧЧ:ММ` или `ДД.ММ.ГГГГ ЧЧ:ММ:СС` - полная дата и время\n\n"
-            f"*Примеры:*\n"
-            f"• `15:30` или `15:30:45`\n"
-            f"• `25.12 18:00` или `25.12 18:00:30`\n"
-            f"• `01.01.2025 00:00` или `01.01.2025 00:00:15`",
+            Text(
+                "📝 Текст сохранен:\n",
+                self.text_preview(text, 1000),
+                "\n\n⏰ Теперь введите дату и время отправки.\n\n",
+                Bold("Форматы:"),
+                "\n• ",
+                Code("ЧЧ:ММ"),
+                " или ",
+                Code("ЧЧ:ММ:СС"),
+                " - только время (сегодня или завтра)\n• ",
+                Code("ДД.ММ ЧЧ:ММ"),
+                " или ",
+                Code("ДД.ММ ЧЧ:ММ:СС"),
+                " - дата и время текущего года\n• ",
+                Code("ДД.ММ.ГГГГ ЧЧ:ММ"),
+                " или ",
+                Code("ДД.ММ.ГГГГ ЧЧ:ММ:СС"),
+                " - полная дата и время\n\n",
+                Bold("Примеры:"),
+                "\n• ",
+                Code("15:30"),
+                " или ",
+                Code("15:30:45"),
+                "\n• ",
+                Code("25.12 18:00"),
+                " или ",
+                Code("25.12 18:00:30"),
+                "\n• ",
+                Code("01.01.2025 00:00"),
+                " или ",
+                Code("01.01.2025 00:00:15"),
+            ),
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await state.set_state(BotStates.waiting_delayed_message_datetime)
     
@@ -967,14 +1027,20 @@ class TelegramBotController:
             builder.row(InlineKeyboardButton(text="❌ Отменить создание", callback_data="cancel_creating_message"))
             
             await self.send_text(message.answer,
-                f"📝 *Текст сохранен:*\n{self.text_preview(text, 1000)}\n\n"
-                f"⏰ *Время отправки:* _{target_datetime.strftime('%d.%m.%Y %H:%M:%S')} МСК_\n\n"
-                f"📎 *Добавление файлов и изображений*\n\n"
-                f"Теперь можете отправить файлы или изображения для отложенного сообщения. "
-                f"Максимальный размер каждого файла: 10 МБ.\n\n"
-                f"Когда закончите добавлять файлы, нажмите '✅ Создать сообщение'",
+                Text(
+                    "📝 ",
+                    Bold("Текст сохранен:"),
+                    "\n",
+                    self.text_preview(text, 1000),
+                    "\n\n⏰ ",
+                    Bold("Время отправки:"),
+                    " ",
+                    Italic(target_datetime.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                    "\n\n📎 ",
+                    Bold("Добавление файлов и изображений"),
+                    "\n\nТеперь можете отправить файлы или изображения для отложенного сообщения. Максимальный размер каждого файла: 10 МБ.\n\nКогда закончите добавлять файлы, нажмите '✅ Создать сообщение'",
+                ),
                 reply_markup=builder.as_markup(),
-                parse_mode="Markdown"
             )
             await state.set_state(BotStates.waiting_delayed_message_attachments)
             
@@ -1108,10 +1174,14 @@ class TelegramBotController:
                             try:
                                 await self.send_text(self.bot.send_message,
                                     self.owner_id,
-                                    f"✅ *Отложенное сообщение отправлено!*\n\n"
-                                    f"📝 Текст:\n{self.text_preview(delayed_msg.text, 1000)}\n"
-                                    f"⏰ Время: _{delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_",
-                                    parse_mode="Markdown"
+                                    Text(
+                                        "✅ ",
+                                        Bold("Отложенное сообщение отправлено!"),
+                                        "\n\n📝 Текст:\n",
+                                        self.text_preview(delayed_msg.text, 1000),
+                                        "\n⏰ Время: ",
+                                        Italic(delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                                    ),
                                 )
                             except Exception as e:
                                 _log.error(f"Не удалось отправить уведомление о доставке: {e}")
@@ -1121,10 +1191,14 @@ class TelegramBotController:
                             try:
                                 await self.send_text(self.bot.send_message,
                                     self.owner_id,
-                                    f"❌ *Ошибка отправки отложенного сообщения!*\n\n"
-                                    f"📝 Текст:\n{self.text_preview(delayed_msg.text, 1000)}\n"
-                                    f"⏰ Время: _{delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_",
-                                    parse_mode="Markdown"
+                                    Text(
+                                        "❌ ",
+                                        Bold("Ошибка отправки отложенного сообщения!"),
+                                        "\n\n📝 Текст:\n",
+                                        self.text_preview(delayed_msg.text, 1000),
+                                        "\n⏰ Время: ",
+                                        Italic(delayed_msg.date_time.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                                    ),
                                 )
                             except Exception as e:
                                 _log.error(f"Не удалось отправить уведомление об ошибке: {e}")
@@ -1182,7 +1256,7 @@ class TelegramBotController:
         page = min(max(page, 0), (len(sorted_messages) - 1) // 15)
         page_messages = sorted_messages[page * 15:(page + 1) * 15]
         
-        text = "📋 *Отложенные сообщения:*\n\n"
+        text = Text("📋 ", Bold("Отложенные сообщения:"), "\n\n")
         
         builder = InlineKeyboardBuilder()
         for msg in page_messages:
@@ -1201,7 +1275,17 @@ class TelegramBotController:
                 elif files_count:
                     attachments_info = f" 📁{files_count}"
             
-            text += f"*№{msg.id}* — _{msg.date_time.strftime('%d.%m %H:%M')}_{attachments_info} [{msg.status}]\n`{preview_text}`\n\n"
+            text += Text(
+                Bold("№", msg.id),
+                " — ",
+                Italic(msg.date_time.strftime('%d.%m %H:%M')),
+                attachments_info,
+                " [",
+                msg.status,
+                "]\n",
+                Code(preview_text),
+                "\n\n",
+            )
             
             # Добавляем кнопки управления
             builder.row(
@@ -1218,7 +1302,6 @@ class TelegramBotController:
         await self.send_text(callback.message.edit_text,
             text,
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await callback.answer()
     
@@ -1246,11 +1329,16 @@ class TelegramBotController:
         builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="view_delayed_messages"))
         
         # Формируем информацию о вложениях
-        attachments_info = ""
+        attachments_info = Text()
         if msg.delivery_progress.get("uncertain"):
             attachments_info += "\n⚠️ Ответ Discord потерян. Проверьте последнюю часть перед повтором: она могла доставиться."
         if msg.attachments:
-            attachments_info += f"\n*Вложения:* {len(msg.attachments)}"
+            attachments_info += Text(
+                "\n",
+                Bold("Вложения:"),
+                " ",
+                len(msg.attachments),
+            )
             for att in msg.attachments[:3]:  # Показываем первые 3 файла
                 att_type = "🖼" if att.is_image else "📁"
                 size_mb = att.file_size / (1024 * 1024)
@@ -1259,12 +1347,24 @@ class TelegramBotController:
                 attachments_info += f"\n... и еще {len(msg.attachments) - 3}"
         
         await self.send_text(callback.message.edit_text,
-            f"📝 *Редактирование сообщения #{message_id}*\n\n"
-            f"*Текст:*\n{self.text_preview(msg.text, 1000)}\n"
-            f"*Время отправки:* _{msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_\n"
-            f"*Создано:* _{msg.created_at.strftime('%d.%m.%Y %H:%M:%S')} МСК_{attachments_info}",
+            Text(
+                "📝 ",
+                Bold("Редактирование сообщения #", message_id),
+                "\n\n",
+                Bold("Текст:"),
+                "\n",
+                self.text_preview(msg.text, 1000),
+                "\n",
+                Bold("Время отправки:"),
+                " ",
+                Italic(msg.date_time.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                "\n",
+                Bold("Создано:"),
+                " ",
+                Italic(msg.created_at.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                attachments_info,
+            ),
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await callback.answer()
 
@@ -1303,11 +1403,14 @@ class TelegramBotController:
         msg = self.delayed_messages[message_id]
         
         await self.send_text(callback.message.edit_text,
-            f"✏️ *Редактирование текста сообщения #{message_id}*\n\n"
-            f"Текущий текст:\n{self.text_preview(msg.text, 1000)}\n\n"
-            f"Введите новый текст:",
+            Text(
+                "✏️ ",
+                Bold("Редактирование текста сообщения #", message_id),
+                "\n\nТекущий текст:\n",
+                self.text_preview(msg.text, 1000),
+                "\n\nВведите новый текст:",
+            ),
             reply_markup=self.get_back_keyboard("view_delayed_messages"),
-            parse_mode="Markdown"
         )
         await state.set_state(BotStates.editing_delayed_message_text)
         await callback.answer()
@@ -1340,10 +1443,13 @@ class TelegramBotController:
         await state.clear()
         
         await self.send_text(message.answer,
-            f"✅ *Текст сообщения #{message_id} обновлен!*\n\n"
-            f"Новый текст:\n{self.text_preview(new_text, 1000)}",
+            Text(
+                "✅ ",
+                Bold("Текст сообщения #", message_id, " обновлен!"),
+                "\n\nНовый текст:\n",
+                self.text_preview(new_text, 1000),
+            ),
             reply_markup=self.get_back_keyboard("view_delayed_messages"),
-            parse_mode="Markdown"
         )
         _log.info(f"Текст отложенного сообщения #{message_id} изменен")
     
@@ -1363,15 +1469,28 @@ class TelegramBotController:
         msg = self.delayed_messages[message_id]
         
         await self.send_text(callback.message.edit_text,
-            f"⏰ *Редактирование времени сообщения #{message_id}*\n\n"
-            f"Текущее время: _{msg.date_time.strftime('%d.%m.%Y %H:%M:%S')} МСК_\n\n"
-            f"Введите новое время отправки:\n\n"
-            f"*Форматы:*\n"
-            f"• `ЧЧ:ММ` или `ЧЧ:ММ:СС` - только время\n"
-            f"• `ДД.ММ ЧЧ:ММ` или `ДД.ММ ЧЧ:ММ:СС` - дата и время\n"
-            f"• `ДД.ММ.ГГГГ ЧЧ:ММ` или `ДД.ММ.ГГГГ ЧЧ:ММ:СС` - полная дата и время",
+            Text(
+                "⏰ ",
+                Bold("Редактирование времени сообщения #", message_id),
+                "\n\nТекущее время: ",
+                Italic(msg.date_time.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                "\n\nВведите новое время отправки:\n\n",
+                Bold("Форматы:"),
+                "\n• ",
+                Code("ЧЧ:ММ"),
+                " или ",
+                Code("ЧЧ:ММ:СС"),
+                " - только время\n• ",
+                Code("ДД.ММ ЧЧ:ММ"),
+                " или ",
+                Code("ДД.ММ ЧЧ:ММ:СС"),
+                " - дата и время\n• ",
+                Code("ДД.ММ.ГГГГ ЧЧ:ММ"),
+                " или ",
+                Code("ДД.ММ.ГГГГ ЧЧ:ММ:СС"),
+                " - полная дата и время",
+            ),
             reply_markup=self.get_back_keyboard("view_delayed_messages"),
-            parse_mode="Markdown"
         )
         await state.set_state(BotStates.editing_delayed_message_datetime)
         await callback.answer()
@@ -1413,10 +1532,13 @@ class TelegramBotController:
             await state.clear()
             
             await self.send_text(message.answer,
-                f"✅ *Время сообщения #{message_id} обновлено!*\n\n"
-                f"Новое время: _{new_datetime.strftime('%d.%m.%Y %H:%M:%S')} МСК_",
+                Text(
+                    "✅ ",
+                    Bold("Время сообщения #", message_id, " обновлено!"),
+                    "\n\nНовое время: ",
+                    Italic(new_datetime.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                ),
                 reply_markup=self.get_back_keyboard("view_delayed_messages"),
-                parse_mode="Markdown"
             )
             _log.info(f"Время отложенного сообщения #{message_id} изменено на {new_datetime}")
             
@@ -1457,10 +1579,13 @@ class TelegramBotController:
         self.cleanup_message_files(message_id, msg)
         
         await self.send_text(callback.message.edit_text,
-            f"✅ *Отложенное сообщение #{message_id} удалено!*\n\n"
-            f"Текст удаленного сообщения:\n{self.text_preview(msg.text, 1000)}",
+            Text(
+                "✅ ",
+                Bold("Отложенное сообщение #", message_id, " удалено!"),
+                "\n\nТекст удаленного сообщения:\n",
+                self.text_preview(msg.text, 1000),
+            ),
             reply_markup=self.get_back_keyboard("view_delayed_messages"),
-            parse_mode="Markdown"
         )
         await callback.answer("Сообщение удалено!")
         _log.info(f"Отложенное сообщение #{message_id} удалено")
@@ -1490,7 +1615,6 @@ class TelegramBotController:
         await self.send_text(callback.message.edit_text,
             '❌ Создание сообщения отменено\n\nВсе временные данные и файлы удалены.',
             reply_markup=self.get_back_keyboard("delayed_messages_menu"),
-            parse_mode="Markdown"
         )
         
         await callback.answer("Создание отменено")
@@ -1607,9 +1731,14 @@ class TelegramBotController:
         attachments = msg.attachments[page * 10:(page + 1) * 10]
         # Формируем текст с информацией о вложениях
         if msg.attachments:
-            text = f"📎 *Управление вложениями сообщения #{message_id}*\n\n"
-            text += f"*Всего вложений:* {len(msg.attachments)}\n\n"
-            text += "_Нажмите на название файла для просмотра, 🗑 для удаления._\n\n"
+            text = Text("📎 ", Bold("Управление вложениями сообщения #", message_id), "\n\n")
+            text += Text(
+                Bold("Всего вложений:"),
+                " ",
+                len(msg.attachments),
+                "\n\n",
+            )
+            text += Text(Italic("Нажмите на название файла для просмотра, 🗑 для удаления."), "\n\n")
             
             for i, att in enumerate(attachments, page * 10 + 1):
                 att_type = "🖼" if att.is_image else "📁"
@@ -1617,7 +1746,7 @@ class TelegramBotController:
                 text += f"{i}. {att_type} {self.text_preview(att.original_name, 200)}\n"
                 text += f"   Размер: {size_mb:.2f} МБ\n\n"
         else:
-            text = f"📎 *Управление вложениями сообщения #{message_id}*\n\n"
+            text = Text("📎 ", Bold("Управление вложениями сообщения #", message_id), "\n\n")
             text += "У этого сообщения пока нет вложений."
         
         # Создаем кнопки управления
@@ -1650,7 +1779,6 @@ class TelegramBotController:
         await self.send_text(callback.message.edit_text,
             text,
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
     
     async def add_attachments_callback(self, callback: types.CallbackQuery, state: FSMContext):
@@ -1679,7 +1807,6 @@ class TelegramBotController:
         await self.send_text(callback.message.edit_text,
             "📎 Добавление новых вложений\n\nОтправьте файлы, изображения, видео или аудио которые хотите добавить к сообщению.\n\nКогда закончите добавлять файлы, нажмите '💾 Сохранить изменения'.",
             reply_markup=builder.as_markup(),
-            parse_mode="Markdown"
         )
         await callback.answer()
     
@@ -1769,7 +1896,6 @@ class TelegramBotController:
                 f"📊 Всего файлов: {len(delayed_msg.attachments) + len(draft)}\n\n"
                 f"Можете добавить еще файлы или сохранить изменения.",
                 reply_markup=builder.as_markup(),
-                parse_mode="Markdown"
             )
             
             _log.info(f"Добавлено вложение '{file_name}' к сообщению #{message_id}")
@@ -1886,7 +2012,6 @@ class TelegramBotController:
                 f"📊 Всего файлов: {len(attachments)}\n\n"
                 f"Можете добавить еще файлы или создать сообщение.",
                 reply_markup=builder.as_markup(),
-                parse_mode="Markdown"
             )
             
         except Exception as e:
@@ -1937,11 +2062,16 @@ class TelegramBotController:
             # Отправляем в тот же чат где была команда
             await self.send_text(self.bot.send_message,
                 self.owner_id,
-                f"✅ *Отложенное сообщение создано!*\n\n"
-                f"📝 Текст:\n{self.text_preview(text, 1000)}\n"
-                f"⏰ Время отправки: _{target_datetime.strftime('%d.%m.%Y %H:%M:%S')} МСК_{attachment_info}",
+                Text(
+                    "✅ ",
+                    Bold("Отложенное сообщение создано!"),
+                    "\n\n📝 Текст:\n",
+                    self.text_preview(text, 1000),
+                    "\n⏰ Время отправки: ",
+                    Italic(target_datetime.strftime('%d.%m.%Y %H:%M:%S'), " МСК"),
+                    attachment_info,
+                ),
                 reply_markup=self.get_back_keyboard("delayed_messages_menu"),
-                parse_mode="Markdown"
             )
             
             _log.info(f"Создано отложенное сообщение #{message_id} на {target_datetime} с {len(attachments)} вложениями")
