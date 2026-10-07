@@ -60,3 +60,44 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["messages"]["1"]["status"], "failed")
         later = DelayedMessage(2, "next", job.date_time, job.created_at)
         self.assertFalse(c._has_same_time_predecessor(later))
+
+    async def test_atomic_save_and_corrupt_load(self):
+        c = self.controller
+        self.job(True).date_time += timedelta(days=1)
+        c.save_delayed_messages()
+        original = c.data_file.read_bytes()
+        with patch("utils.os.replace", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                c.save_delayed_messages()
+        self.assertEqual(c.data_file.read_bytes(), original)
+        c.data_file.write_text("{broken")
+        with self.assertRaises(ValueError):
+            c.load_delayed_messages()
+        self.assertEqual(c.data_file.read_text(), "{broken")
+
+    async def test_creation_save_failure_never_starts_job(self):
+        c = self.controller
+        future = datetime.now(c.moscow_tz) + timedelta(days=1)
+        state = SimpleNamespace(get_data=AsyncMock(return_value={
+            "delayed_message_id": 2, "delayed_message_text": "draft",
+            "delayed_message_datetime": future,
+        }), clear=AsyncMock())
+        with patch.object(c, "save_delayed_messages", side_effect=OSError("disk failure")):
+            self.assertFalse(await c.finalize_delayed_message(state))
+        self.assertEqual(c.delayed_messages, {})
+        self.assertEqual(c.delayed_tasks, {})
+        self.assertEqual(c.next_message_id, 2)
+        state.clear.assert_not_awaited()
+
+    async def test_delete_save_failure_preserves_files_and_task(self):
+        c = self.controller
+        job = self.job(True)
+        task = Mock()
+        c.delayed_tasks[1] = task
+        callback = SimpleNamespace(from_user=SimpleNamespace(id=1), data="delete_delayed_1",
+                                   answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
+        with patch.object(c, "save_delayed_messages", side_effect=OSError("disk failure")):
+            await c.delete_delayed_message_callback(callback)
+        self.assertIs(c.delayed_messages[1], job)
+        self.assertTrue(Path(job.attachments[0].file_path).exists())
+        task.cancel.assert_not_called()

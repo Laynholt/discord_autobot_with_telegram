@@ -1,11 +1,31 @@
 
 import os
 import logging
+import json
+import tempfile
+from pathlib import Path
 
 __all__ = ["load_env_config"]
 
 
 _log = logging.getLogger(__name__)
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Replace only after a complete flushed write in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_env_config() -> dict[str, str]:

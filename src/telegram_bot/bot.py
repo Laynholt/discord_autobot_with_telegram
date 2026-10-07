@@ -8,6 +8,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import List, Optional
+from contextlib import contextmanager
+from utils import atomic_write_json
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -125,13 +127,31 @@ class TelegramBotController:
                     ]
                 }
             
-            with open(self.data_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            atomic_write_json(self.data_file, data)
                 
             _log.info(f"Сохранено {len(self.delayed_messages)} отложенных сообщений в {self.data_file}")
             
         except Exception as e:
             _log.error(f"Ошибка при сохранении отложенных сообщений: {e}")
+            raise
+
+    @contextmanager
+    def persist_changes(self):
+        """Roll back synchronous queue mutations if their disk commit fails."""
+        previous = dict(self.delayed_messages)
+        fields = {key: {**vars(msg), "attachments": list(msg.attachments)}
+                  for key, msg in previous.items()}
+        previous_id = self.next_message_id
+        try:
+            yield
+            self.save_delayed_messages()
+        except Exception:
+            for key, msg in previous.items():
+                vars(msg).update(fields[key])
+            self.delayed_messages.clear()
+            self.delayed_messages.update(previous)
+            self.next_message_id = previous_id
+            raise
     
     def load_delayed_messages(self):
         """Загружает отложенные сообщения из JSON файла"""
@@ -193,6 +213,7 @@ class TelegramBotController:
                 
         except Exception as e:
             _log.error(f"Ошибка при загрузке отложенных сообщений: {e}")
+            raise ValueError(f"Не удалось восстановить очередь из {self.data_file}; файл сохранён") from e
     
     def _cleanup_expired_messages(self, expired_messages: list):
         """Очищает просроченные сообщения и их файлы"""
@@ -310,10 +331,10 @@ class TelegramBotController:
             escaped_text = escaped_text.replace(char, f'\\{char}')
         return escaped_text
     
-    def cleanup_message_files(self, message_id: int):
+    def cleanup_message_files(self, message_id: int, msg: DelayedMessage | None = None):
         """Удаление всех файлов отложенного сообщения"""
-        if message_id in self.delayed_messages:
-            msg = self.delayed_messages[message_id]
+        msg = msg or self.delayed_messages.get(message_id)
+        if msg is not None:
             for attachment in msg.attachments:
                 try:
                     if os.path.exists(attachment.file_path):
@@ -1057,12 +1078,18 @@ class TelegramBotController:
                             except Exception as e:
                                 _log.error(f"Не удалось отправить уведомление об ошибке: {e}")
                         
+                        try:
+                            with self.persist_changes():
+                                if success:
+                                    del self.delayed_messages[delayed_msg.id]
+                                else:
+                                    delayed_msg.status = "failed"
+                        except OSError:
+                            # Keep a delivered job inert in memory until a later save succeeds.
+                            delayed_msg.status = "sent" if success else "failed"
+                            raise
                         if success:
-                            self.cleanup_message_files(delayed_msg.id)
-                            del self.delayed_messages[delayed_msg.id]
-                        else:
-                            delayed_msg.status = "failed"
-                        self.save_delayed_messages()
+                            self.cleanup_message_files(delayed_msg.id, delayed_msg)
                         if delayed_msg.id in self.delayed_tasks:
                             del self.delayed_tasks[delayed_msg.id]
 
@@ -1181,9 +1208,13 @@ class TelegramBotController:
         if job is None or job.status != "failed":
             await callback.answer("❌ Сообщение уже отправляется или отсутствует")
             return
-        job.status = "pending"
-        job.date_time = datetime.now(self.moscow_tz)
-        self.save_delayed_messages()
+        try:
+            with self.persist_changes():
+                job.status = "pending"
+                job.date_time = datetime.now(self.moscow_tz)
+        except OSError:
+            await callback.answer("❌ Не удалось сохранить. Повторите позже.")
+            return
         self.delayed_tasks[message_id] = asyncio.create_task(self.schedule_delayed_message(job))
         await callback.answer("🔄 Повторная отправка запущена")
     
@@ -1226,10 +1257,12 @@ class TelegramBotController:
             await state.clear()
             return
         
-        self.delayed_messages[message_id].text = new_text
-        
-        # Сохраняем изменения
-        self.save_delayed_messages()
+        try:
+            with self.persist_changes():
+                self.delayed_messages[message_id].text = new_text
+        except OSError:
+            await message.answer("❌ Не удалось сохранить. Повторите позже.")
+            return
         
         await state.clear()
         
@@ -1286,17 +1319,15 @@ class TelegramBotController:
         
         try:
             new_datetime = self.parse_datetime_string(datetime_str)
+
+            with self.persist_changes():
+                self.delayed_messages[message_id].date_time = new_datetime
+                self.delayed_messages[message_id].status = "pending"
             
             # Отменяем старую задачу
             if message_id in self.delayed_tasks:
                 self.delayed_tasks[message_id].cancel()
                 del self.delayed_tasks[message_id]
-            
-            # Обновляем время
-            self.delayed_messages[message_id].date_time = new_datetime
-            
-            # Сохраняем изменения
-            self.save_delayed_messages()
             
             # Создаем новую задачу
             delayed_msg = self.delayed_messages[message_id]
@@ -1315,6 +1346,8 @@ class TelegramBotController:
             
         except ValueError as e:
             await message.answer(f"❌ Ошибка в формате даты/времени: {e}\n\nПопробуйте еще раз:")
+        except OSError:
+            await message.answer("❌ Не удалось сохранить. Повторите позже.")
     
     async def delete_delayed_message_callback(self, callback: types.CallbackQuery):
         """Удаление отложенного сообщения"""
@@ -1328,18 +1361,21 @@ class TelegramBotController:
             await callback.answer("❌ Сообщение не найдено")
             return
         
+        msg = self.delayed_messages[message_id]
+        try:
+            with self.persist_changes():
+                del self.delayed_messages[message_id]
+        except OSError:
+            await callback.answer("❌ Не удалось сохранить. Повторите позже.")
+            return
+
         # Отменяем задачу
         if message_id in self.delayed_tasks:
             self.delayed_tasks[message_id].cancel()
             del self.delayed_tasks[message_id]
         
         # Очищаем временные файлы и удаляем сообщение
-        self.cleanup_message_files(message_id)
-        msg = self.delayed_messages[message_id]
-        del self.delayed_messages[message_id]
-        
-        # Сохраняем изменения
-        self.save_delayed_messages()
+        self.cleanup_message_files(message_id, msg)
         
         await callback.message.edit_text(
             f"✅ *Отложенное сообщение #{message_id} удалено!*\n\n"
@@ -1356,8 +1392,8 @@ class TelegramBotController:
             await callback.answer("❌ Доступ запрещен")
             return
         
-        await self.finalize_delayed_message(state)
-        await callback.answer("Сообщение создано!")
+        created = await self.finalize_delayed_message(state)
+        await callback.answer("Сообщение создано!" if created else "❌ Сообщение не создано")
     
     async def cancel_creating_message_callback(self, callback: types.CallbackQuery, state: FSMContext):
         """Отмена создания отложенного сообщения"""
@@ -1503,20 +1539,21 @@ class TelegramBotController:
             await callback.answer("❌ Вложение не найдено")
             return
         
+        try:
+            with self.persist_changes():
+                deleted_attachment = msg.attachments.pop(attachment_index)
+        except OSError:
+            await callback.answer("❌ Не удалось сохранить. Повторите позже.")
+            return
+
         # Удаляем файл с диска
-        attachment = msg.attachments[attachment_index]
+        attachment = deleted_attachment
         try:
             if os.path.exists(attachment.file_path):
                 os.remove(attachment.file_path)
                 _log.info(f"Удален файл вложения: {attachment.file_path}")
         except Exception as e:
             _log.error(f"Ошибка при удалении файла {attachment.file_path}: {e}")
-        
-        # Удаляем вложение из списка
-        deleted_attachment = msg.attachments.pop(attachment_index)
-        
-        # Сохраняем изменения
-        self.save_delayed_messages()
         
         # Обновляем отображение
         await self._update_attachments_display(callback, message_id)
@@ -1800,11 +1837,9 @@ class TelegramBotController:
                 attachments=attachments
             )
             
-            self.delayed_messages[message_id] = delayed_msg
-            self.next_message_id += 1
-            
-            # Сохраняем изменения
-            self.save_delayed_messages()
+            with self.persist_changes():
+                self.delayed_messages[message_id] = delayed_msg
+                self.next_message_id += 1
             
             # Запускаем задачу отправки
             task = asyncio.create_task(self.schedule_delayed_message(delayed_msg))
@@ -1833,6 +1868,7 @@ class TelegramBotController:
             )
             
             _log.info(f"Создано отложенное сообщение #{message_id} на {target_datetime} с {len(attachments)} вложениями")
+            return True
             
         except Exception as e:
             _log.error(f"Ошибка при финализации отложенного сообщения: {e}")
@@ -1840,6 +1876,7 @@ class TelegramBotController:
                 self.owner_id,
                 f"❌ Ошибка при создании отложенного сообщения: {e}"
             )
+            return False
     
     async def process_edit_delayed_attachments(self, message: types.Message, state: FSMContext):
         """Обработка редактирования вложений отложенного сообщения"""
@@ -1858,7 +1895,10 @@ class TelegramBotController:
         """Остановка бота"""
         # Сохраняем отложенные сообщения перед остановкой
         _log.info("Сохранение отложенных сообщений перед остановкой...")
-        self.save_delayed_messages()
+        try:
+            self.save_delayed_messages()
+        except OSError:
+            _log.exception("Не удалось сохранить очередь при остановке")
         
         # Отменяем все отложенные задачи
         for task in self.delayed_tasks.values():
