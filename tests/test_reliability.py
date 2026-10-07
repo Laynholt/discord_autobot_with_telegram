@@ -4,7 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -89,6 +89,13 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.delayed_tasks, {})
         self.assertEqual(c.next_message_id, 2)
         state.clear.assert_not_awaited()
+
+    async def test_random_time_at_end_of_window(self):
+        bot = discord_module.DiscordBot(1, 2)
+        for second in (58, 59):
+            value = bot.get_random_time_in_range(time(11, 59, second), time(12))
+            self.assertGreaterEqual(value, time(11, 59, second))
+            self.assertLessEqual(value, time(12))
 
     async def test_telegram_output_is_bounded_and_unparsed(self):
         c = self.controller

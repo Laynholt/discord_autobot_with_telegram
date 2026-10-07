@@ -484,7 +484,7 @@ class DiscordBot(discord.Client):
         else:
             # Генерируем случайное количество секунд в заданном диапазоне
             # Сдвигаем на 3 секунды для надежности
-            random_seconds: int = random.randint(start_seconds + WORK_DAY_END_SECOND_SHIFT, end_seconds)
+            random_seconds: int = random.randint(min(start_seconds + WORK_DAY_END_SECOND_SHIFT, end_seconds), end_seconds)
         
         # Конвертируем секунды обратно в часы, минуты и секунды
         hours: int = random_seconds // SECONDS_IN_HOUR
