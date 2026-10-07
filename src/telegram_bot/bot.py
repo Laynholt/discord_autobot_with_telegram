@@ -54,6 +54,7 @@ class DelayedMessage:
     date_time: datetime
     created_at: datetime
     attachments: List[DelayedAttachment] = field(default_factory=list)
+    status: str = "pending"
 
 
 class TelegramBotController:
@@ -112,6 +113,7 @@ class TelegramBotController:
                     "text": delayed_msg.text,
                     "date_time": delayed_msg.date_time.isoformat(),
                     "created_at": delayed_msg.created_at.isoformat(),
+                    "status": delayed_msg.status,
                     "attachments": [
                         {
                             "file_path": att.file_path,
@@ -155,7 +157,7 @@ class TelegramBotController:
                 created_at = datetime.fromisoformat(msg_data["created_at"])
                 
                 # Если сообщение просрочено, добавляем в список для удаления
-                if date_time <= current_time:
+                if date_time <= current_time and msg_data.get("status", "pending") == "pending":
                     expired_messages.append((msg_id, msg_data))
                     continue
                 
@@ -176,7 +178,8 @@ class TelegramBotController:
                     text=msg_data["text"],
                     date_time=date_time,
                     created_at=created_at,
-                    attachments=attachments
+                    attachments=attachments,
+                    status=msg_data.get("status", "pending")
                 )
                 
                 self.delayed_messages[msg_id] = delayed_msg
@@ -217,6 +220,8 @@ class TelegramBotController:
         )
         
         for msg_id, delayed_msg in sorted_messages:
+            if delayed_msg.status != "pending":
+                continue
             try:
                 # Создаем задачу для отправки сообщения
                 task = asyncio.create_task(self.schedule_delayed_message(delayed_msg))
@@ -235,6 +240,8 @@ class TelegramBotController:
         current_order_key = (delayed_msg.created_at, delayed_msg.id)
         
         for other in self.delayed_messages.values():
+            if other.status != "pending":
+                continue
             if other.id == delayed_msg.id:
                 continue
             if other.date_time != delayed_msg.date_time:
@@ -433,6 +440,7 @@ class TelegramBotController:
         self.dp.callback_query(F.data == "view_delayed_messages")(self.view_delayed_messages_callback)
         self.dp.callback_query(F.data.startswith("edit_delayed_"))(self.edit_delayed_message_callback)
         self.dp.callback_query(F.data.startswith("delete_delayed_"))(self.delete_delayed_message_callback)
+        self.dp.callback_query(F.data.startswith("retry_delayed_"))(self.retry_delayed_message_callback)
         self.dp.callback_query(F.data.startswith("edit_text_"))(self.edit_delayed_text_callback)
         self.dp.callback_query(F.data.startswith("edit_datetime_"))(self.edit_delayed_datetime_callback)
         self.dp.callback_query(F.data.startswith("manage_attachments_"))(self.manage_attachments_callback)
@@ -1049,12 +1057,12 @@ class TelegramBotController:
                             except Exception as e:
                                 _log.error(f"Не удалось отправить уведомление об ошибке: {e}")
                         
-                        # Очищаем временные файлы и удаляем из хранилища
-                        self.cleanup_message_files(delayed_msg.id)
-                        if delayed_msg.id in self.delayed_messages:
+                        if success:
+                            self.cleanup_message_files(delayed_msg.id)
                             del self.delayed_messages[delayed_msg.id]
-                            # Сохраняем изменения после успешной отправки
-                            self.save_delayed_messages()
+                        else:
+                            delayed_msg.status = "failed"
+                        self.save_delayed_messages()
                         if delayed_msg.id in self.delayed_tasks:
                             del self.delayed_tasks[delayed_msg.id]
 
@@ -1103,7 +1111,7 @@ class TelegramBotController:
                 elif files_count:
                     attachments_info = f" 📁{files_count}"
             
-            text += f"*№{msg.id}* — _{msg.date_time.strftime('%d.%m %H:%M')}_{attachments_info}\n`{preview_text}`\n\n"
+            text += f"*№{msg.id}* — _{msg.date_time.strftime('%d.%m %H:%M')}_{attachments_info} [{msg.status}]\n`{preview_text}`\n\n"
             
             # Добавляем кнопки управления
             builder.row(
@@ -1135,6 +1143,8 @@ class TelegramBotController:
         msg = self.delayed_messages[message_id]
         
         builder = InlineKeyboardBuilder()
+        if msg.status == "failed":
+            builder.row(InlineKeyboardButton(text="🔄 Повторить отправку", callback_data=f"retry_delayed_{message_id}"))
         builder.row(InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"edit_text_{message_id}"))
         builder.row(InlineKeyboardButton(text="⏰ Изменить время", callback_data=f"edit_datetime_{message_id}"))
         builder.row(InlineKeyboardButton(text="📎 Управление файлами", callback_data=f"manage_attachments_{message_id}"))
@@ -1161,6 +1171,21 @@ class TelegramBotController:
             parse_mode="Markdown"
         )
         await callback.answer()
+
+    async def retry_delayed_message_callback(self, callback: types.CallbackQuery):
+        if not self.check_owner(callback.from_user.id):
+            await callback.answer("❌ Доступ запрещен")
+            return
+        message_id = int(callback.data.split("_")[-1])
+        job = self.delayed_messages.get(message_id)
+        if job is None or job.status != "failed":
+            await callback.answer("❌ Сообщение уже отправляется или отсутствует")
+            return
+        job.status = "pending"
+        job.date_time = datetime.now(self.moscow_tz)
+        self.save_delayed_messages()
+        self.delayed_tasks[message_id] = asyncio.create_task(self.schedule_delayed_message(job))
+        await callback.answer("🔄 Повторная отправка запущена")
     
     async def edit_delayed_text_callback(self, callback: types.CallbackQuery, state: FSMContext):
         """Начало редактирования текста отложенного сообщения"""

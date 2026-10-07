@@ -12,7 +12,7 @@ dependencies = [
     "colorama>=0.4.6",
     "curl-cffi>=0.11.4",
     "discord-protos<1.0.0",
-    "discord-py-self>=2.0.1",
+    "discord-py-self>=2.1.0",
     "pytz>=2025.2",
     "tzlocal>=4.0.0",
 ]
