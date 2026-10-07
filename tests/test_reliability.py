@@ -174,7 +174,9 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         job.date_time += timedelta(days=1)
         callback = SimpleNamespace(from_user=SimpleNamespace(id=1), data="save_attachments_1",
                                    answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
-        state = SimpleNamespace(clear=AsyncMock())
+        state = SimpleNamespace(clear=AsyncMock(), get_data=AsyncMock(return_value={
+            "editing_message_id": 1, "new_attachments": list(job.attachments)}))
+        job.attachments.clear()
         await c.save_attachments_callback(callback, state)
         c.delayed_messages.clear()
         c.load_delayed_messages()
@@ -217,3 +219,18 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+    async def test_navigation_discards_draft_without_changing_saved_files(self):
+        c = self.controller
+        job = self.job(True)
+        draft = c.attachments_dir / "draft.txt"
+        draft.write_text("draft")
+        state = SimpleNamespace(get_data=AsyncMock(return_value={
+            "new_attachments": [DelayedAttachment(str(draft), "draft.txt", 5)]}), clear=AsyncMock())
+        event = SimpleNamespace(data="main_menu", from_user=SimpleNamespace(id=1))
+        handler = AsyncMock()
+        await c.reset_navigation(handler, event, {"state": state})
+        self.assertFalse(draft.exists())
+        self.assertTrue(Path(job.attachments[0].file_path).exists())
+        state.clear.assert_awaited_once()
+        handler.assert_awaited_once()

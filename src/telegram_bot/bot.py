@@ -16,7 +16,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 )
@@ -69,7 +69,7 @@ class TelegramBotController:
     def __init__(self, discord_bot: DiscordBot, bot_token: str, owner_id: int):
         self.discord_bot = discord_bot
         self.bot = Bot(token=bot_token)
-        self.dp = Dispatcher(storage=MemoryStorage())
+        self.dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
         self.owner_id = owner_id
         self.moscow_tz = pytz.timezone('Europe/Moscow')
         
@@ -332,7 +332,7 @@ class TelegramBotController:
         """Удаление временных файлов создаваемого сообщения"""
         try:
             data = await state.get_data()
-            attachments = data.get("delayed_message_attachments", [])
+            attachments = data.get("delayed_message_attachments", []) + data.get("new_attachments", [])
             
             for attachment in attachments:
                 # DelayedAttachment объекты имеют атрибут file_path
@@ -417,6 +417,8 @@ class TelegramBotController:
     
     def _setup_handlers(self):
         """Настройка обработчиков команд"""
+        self.dp.callback_query.outer_middleware(self.reset_navigation)
+        self.dp.message.outer_middleware(self.reset_navigation)
         
         # Основные команды
         self.dp.message(Command("start"))(self.start_command)
@@ -468,6 +470,24 @@ class TelegramBotController:
         self.dp.message(BotStates.editing_delayed_message_datetime)(self.process_edit_delayed_datetime)
         self.dp.message(BotStates.editing_delayed_message_attachments)(self.process_edit_delayed_attachments)
         self.dp.message(BotStates.adding_attachments_to_existing)(self.process_adding_attachments)
+
+    async def reset_navigation(self, handler, event, data):
+        """Leaving an input flow discards its uncommitted files and FSM state."""
+        callback_data = getattr(event, "data", None)
+        text = getattr(event, "text", None) or ""
+        navigation = callback_data is not None and not (
+            callback_data == "create_without_files" or
+            callback_data == "cancel_creating_message" or
+            callback_data.startswith("save_attachments_")
+        )
+        command = text.split(maxsplit=1)[0].split("@")[0] if text else ""
+        state = data.get("state")
+        if state is not None and self.check_owner(event.from_user.id) and (
+            navigation or command in {"/start", "/menu"}
+        ):
+            await self.cleanup_creating_message_files(state)
+            await state.clear()
+        return await handler(event, data)
     
     def get_main_menu_keyboard(self) -> InlineKeyboardMarkup:
         """Создает клавиатуру главного меню"""
@@ -1626,7 +1646,7 @@ class TelegramBotController:
             return
         
         # Сохраняем ID сообщения для добавления вложений
-        await state.update_data(editing_message_id=message_id)
+        await state.update_data(editing_message_id=message_id, new_attachments=[])
         await state.set_state(BotStates.adding_attachments_to_existing)
         
         builder = InlineKeyboardBuilder()
@@ -1698,9 +1718,10 @@ class TelegramBotController:
                 is_image=self.is_image_file(file_name)
             )
             
-            # Добавляем к существующему сообщению
+            # Keep uploads in the FSM until explicit Save.
             delayed_msg = self.delayed_messages[message_id]
-            delayed_msg.attachments.append(attachment)
+            draft = data.get("new_attachments", []) + [attachment]
+            await state.update_data(new_attachments=draft)
             
             # Информируем пользователя
             file_type = "🖼 Изображение" if attachment.is_image else "📁 Файл"
@@ -1714,7 +1735,7 @@ class TelegramBotController:
                 f"✅ {file_type} добавлен к сообщению!\n\n"
                 f"📂 Файл: `{file_name}`\n"
                 f"📏 Размер: {size_mb:.2f} МБ\n"
-                f"📊 Всего файлов: {len(delayed_msg.attachments)}\n\n"
+                f"📊 Всего файлов: {len(delayed_msg.attachments) + len(draft)}\n\n"
                 f"Можете добавить еще файлы или сохранить изменения.",
                 reply_markup=builder.as_markup(),
                 parse_mode="Markdown"
@@ -1738,8 +1759,18 @@ class TelegramBotController:
             await callback.answer("❌ Сообщение не найдено")
             return
 
+        data = await state.get_data()
+        if data.get("editing_message_id") != message_id:
+            await callback.answer("❌ Это меню устарело. Откройте добавление файлов снова.")
+            return
+        job = self.delayed_messages[message_id]
+        if job.delivery_progress.get("next_part", 0):
+            await callback.answer("❌ Нельзя менять файлы частично отправленного сообщения")
+            return
+
         try:
-            self.save_delayed_messages()
+            with self.persist_changes():
+                job.attachments.extend(data.get("new_attachments", []))
         except OSError:
             await callback.answer("❌ Не удалось сохранить. Повторите позже.")
             return
