@@ -395,7 +395,16 @@ class DiscordBot(discord.Client):
                     try:
                         for path in paths:
                             files.append(discord.File(path))
-                        await channel.send(content=text or None, files=files)
+                        try:
+                            await channel.send(content=text or None, files=files)
+                        except asyncio.CancelledError:
+                            progress["uncertain"] = True
+                            if on_progress:
+                                try:
+                                    on_progress()
+                                except OSError:
+                                    _log.exception("Не удалось сохранить отменённую отправку")
+                            raise
                     finally:
                         for file in files:
                             file.close()

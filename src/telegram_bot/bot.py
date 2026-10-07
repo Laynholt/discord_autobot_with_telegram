@@ -181,6 +181,9 @@ class TelegramBotController:
                 created_at = datetime.fromisoformat(msg_data["created_at"])
                 
                 status = msg_data.get("status", "pending")
+                if status == "sending":
+                    status = "failed"
+                    msg_data.setdefault("delivery_progress", {})["uncertain"] = True
                 if date_time <= current_time and status == "pending":
                     status = "missed"
                 
@@ -244,7 +247,7 @@ class TelegramBotController:
         current_order_key = (delayed_msg.created_at, delayed_msg.id)
         
         for other in self.delayed_messages.values():
-            if other.status != "pending":
+            if other.status not in {"pending", "sending"}:
                 continue
             if other.id == delayed_msg.id:
                 continue
@@ -423,6 +426,12 @@ class TelegramBotController:
         if len(encoded) <= limit * 2:
             return text
         return encoded[:(limit - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
+
+    @staticmethod
+    def can_edit_payload(job: DelayedMessage) -> bool:
+        return (job.status not in {"sending", "sent"}
+                and not job.delivery_progress.get("next_part", 0)
+                and not job.delivery_progress.get("uncertain"))
 
     async def send_text(self, method, *args, **kwargs):
         """Bound previews at the Telegram API boundary; user text stays literal."""
@@ -1072,6 +1081,8 @@ class TelegramBotController:
                         # Есть более раннее сообщение с тем же временем — ждём своей очереди.
                         pass
                     else:
+                        with self.persist_changes():
+                            delayed_msg.status = "sending"
                         # Отправляем сообщение (с файлами или без)
                         if delayed_msg.attachments:
                             file_paths = [att.file_path for att in delayed_msg.attachments]
@@ -1138,8 +1149,17 @@ class TelegramBotController:
                 
         except asyncio.CancelledError:
             _log.info(f"Отправка отложенного сообщения #{delayed_msg.id} отменена")
+            if delayed_msg.status == "sending":
+                delayed_msg.status = "failed"
+                try:
+                    self.save_delayed_messages()
+                except OSError:
+                    _log.exception("Не удалось сохранить отменённую доставку")
+            raise
         except Exception as e:
             _log.exception(f"Ошибка при отправке отложенного сообщения #{delayed_msg.id}: {e}")
+            if delayed_msg.id in self.delayed_messages and delayed_msg.status != "sent":
+                delayed_msg.status = "failed"
     
     async def view_delayed_messages_callback(self, callback: types.CallbackQuery):
         """Просмотр всех отложенных сообщений"""
@@ -1305,7 +1325,7 @@ class TelegramBotController:
             await state.clear()
             return
 
-        if self.delayed_messages[message_id].delivery_progress.get("next_part", 0):
+        if not self.can_edit_payload(self.delayed_messages[message_id]):
             await self.send_text(message.answer, "❌ Сообщение частично отправлено. Создайте новое для изменения текста.")
             return
         
@@ -1371,6 +1391,9 @@ class TelegramBotController:
         
         try:
             new_datetime = self.parse_datetime_string(datetime_str)
+            if self.delayed_messages[message_id].status == "sending":
+                await self.send_text(message.answer, "❌ Отправка уже началась. Дождитесь её результата.")
+                return
 
             with self.persist_changes():
                 self.delayed_messages[message_id].date_time = new_datetime
@@ -1414,6 +1437,9 @@ class TelegramBotController:
             return
         
         msg = self.delayed_messages[message_id]
+        if msg.status == "sending":
+            await callback.answer("❌ Отправка уже началась. Дождитесь её результата.")
+            return
         try:
             with self.persist_changes():
                 del self.delayed_messages[message_id]
@@ -1541,7 +1567,7 @@ class TelegramBotController:
             return
         
         msg = self.delayed_messages[message_id]
-        if msg.delivery_progress.get("next_part", 0):
+        if not self.can_edit_payload(msg):
             await callback.answer("❌ Нельзя менять файлы частично отправленного сообщения")
             return
         
@@ -1638,7 +1664,7 @@ class TelegramBotController:
             await callback.answer("❌ Сообщение не найдено")
             return
 
-        if self.delayed_messages[message_id].delivery_progress.get("next_part", 0):
+        if not self.can_edit_payload(self.delayed_messages[message_id]):
             await callback.answer("❌ Нельзя менять файлы частично отправленного сообщения")
             return
         
@@ -1701,9 +1727,18 @@ class TelegramBotController:
             if not message_id or message_id not in self.delayed_messages:
                 await self.send_text(message.answer, "❌ Сообщение не найдено")
                 return
+
+            if not self.can_edit_payload(self.delayed_messages[message_id]):
+                await self.send_text(message.answer, "❌ Отправка уже началась; файлы не изменены.")
+                return
             
             # Скачиваем файл
             file_path = await self.download_file(file_info.file_id, file_name, message_id)
+            job = self.delayed_messages.get(message_id)
+            if job is None or not self.can_edit_payload(job):
+                Path(file_path).unlink(missing_ok=True)
+                await self.send_text(message.answer, "❌ Сообщение уже отправляется или удалено. Файл не добавлен.")
+                return
             
             # Создаем вложение
             attachment = DelayedAttachment(
@@ -1751,6 +1786,8 @@ class TelegramBotController:
         message_id = int(callback.data.split("_")[2])
         
         if message_id not in self.delayed_messages:
+            await self.cleanup_creating_message_files(state)
+            await state.clear()
             await callback.answer("❌ Сообщение не найдено")
             return
 
@@ -1759,7 +1796,7 @@ class TelegramBotController:
             await callback.answer("❌ Это меню устарело. Откройте добавление файлов снова.")
             return
         job = self.delayed_messages[message_id]
-        if job.delivery_progress.get("next_part", 0):
+        if not self.can_edit_payload(job):
             await callback.answer("❌ Нельзя менять файлы частично отправленного сообщения")
             return
 

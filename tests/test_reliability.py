@@ -341,3 +341,56 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c.delayed_tasks, {})
         self.assertEqual(c.delayed_messages, {})
         state.clear.assert_not_awaited()
+
+    async def test_active_first_part_cannot_be_edited_or_deleted(self):
+        c = self.controller
+        job = self.job(True)
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def send(**kwargs):
+            entered.set()
+            await release.wait()
+            return True
+        c.discord_bot.send_message_with_files_to_channel = send
+        task = asyncio.create_task(c.schedule_delayed_message(job))
+        c.delayed_tasks[1] = task
+        state = SimpleNamespace(get_data=AsyncMock(return_value={"editing_message_id": 1,
+                                  "new_attachments": [DelayedAttachment("draft", "draft", 1)]}),
+                                clear=AsyncMock())
+        message = SimpleNamespace(from_user=SimpleNamespace(id=1), text="changed", answer=AsyncMock())
+        callback = SimpleNamespace(from_user=message.from_user, data="save_attachments_1",
+                                   answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await c.process_edit_delayed_text(message, state)
+            await c.save_attachments_callback(callback, state)
+            c.parse_datetime_string = lambda _: job.date_time + timedelta(days=1)
+            original_time = job.date_time
+            await c.process_edit_delayed_datetime(message, state)
+            self.assertEqual(job.date_time, original_time)
+            callback.data = "delete_delayed_1"
+            await c.delete_delayed_message_callback(callback)
+            self.assertEqual(job.text, "text")
+            self.assertEqual(len(job.attachments), 1)
+            self.assertIn(1, c.delayed_messages)
+            release.set()
+            await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_cancelled_delivery_keeps_uncertain_progress(self):
+        bot = discord_module.DiscordBot(1, 2, settings_file=None)
+        entered = asyncio.Event()
+        async def send(**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+        bot.get_channel = lambda _: SimpleNamespace(send=send)
+        progress = {}
+        saved = []
+        task = asyncio.create_task(bot.send_message_to_channel(1, "text", progress=progress,
+                                                               on_progress=lambda: saved.append(dict(progress))))
+        await entered.wait()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(progress["uncertain"])
+        self.assertTrue(saved[-1]["uncertain"])
