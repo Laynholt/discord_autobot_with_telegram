@@ -86,8 +86,54 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await c.finalize_delayed_message(state))
         self.assertEqual(c.delayed_messages, {})
         self.assertEqual(c.delayed_tasks, {})
+
         self.assertEqual(c.next_message_id, 2)
         state.clear.assert_not_awaited()
+
+    async def test_partial_delivery_retry_skips_confirmed_parts(self):
+        bot = discord_module.DiscordBot(1, 2)
+        delivered = []
+        failed_once = False
+        async def send(*args, **kwargs):
+            nonlocal failed_once
+            text = kwargs.get("content", args[0] if args else "")
+            if delivered and not failed_once:
+                failed_once = True
+                raise ConnectionResetError("second part")
+            delivered.append(text)
+        channel = SimpleNamespace(send=send)
+        bot.get_channel = lambda _: channel
+        with patch.object(discord_module.asyncio, "sleep", new=AsyncMock()):
+            self.assertTrue(await bot.send_message_to_channel(1, "x" * 2100))
+        self.assertEqual(list(map(len, delivered)), [2000, 100])
+
+    async def test_file_progress_survives_manual_retry_and_reload(self):
+        c = self.controller
+        job = self.job(True)
+        job.text = "x" * 2100
+        bot = discord_module.DiscordBot(1, 2)
+        paths = []
+        for index in range(11):
+            path = c.attachments_dir / str(index)
+            path.write_text("file")
+            paths.append(str(path))
+        received = []
+        async def send(**kwargs):
+            if len(received) == 1 and not job.delivery_progress.get("uncertain"):
+                raise ConnectionResetError("lost response")
+            received.append((len(kwargs.get("files", [])), len(kwargs.get("content") or "")))
+        bot.get_channel = lambda _: SimpleNamespace(send=send)
+        with patch.object(discord_module.asyncio, "sleep", new=AsyncMock()):
+            self.assertFalse(await bot.send_message_with_files_to_channel(1, job.text, paths,
+                progress=job.delivery_progress, on_progress=c.save_delayed_messages))
+            c.delayed_messages.clear()
+            c.load_delayed_messages()
+            progress = c.delayed_messages[1].delivery_progress
+            self.assertEqual(progress["next_part"], 1)
+            self.assertTrue(progress["uncertain"])
+            self.assertTrue(await bot.send_message_with_files_to_channel(1, job.text, paths,
+                progress=progress, on_progress=c.save_delayed_messages))
+        self.assertEqual(received, [(10, 2000), (1, 0), (0, 100)])
 
     async def test_delete_save_failure_preserves_files_and_task(self):
         c = self.controller

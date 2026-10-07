@@ -58,6 +58,7 @@ class DelayedMessage:
     created_at: datetime
     attachments: List[DelayedAttachment] = field(default_factory=list)
     status: str = "pending"
+    delivery_progress: dict = field(default_factory=dict)
 
 
 class TelegramBotController:
@@ -117,6 +118,7 @@ class TelegramBotController:
                     "date_time": delayed_msg.date_time.isoformat(),
                     "created_at": delayed_msg.created_at.isoformat(),
                     "status": delayed_msg.status,
+                    "delivery_progress": delayed_msg.delivery_progress,
                     "attachments": [
                         {
                             "file_path": att.file_path,
@@ -198,7 +200,8 @@ class TelegramBotController:
                     date_time=date_time,
                     created_at=created_at,
                     attachments=attachments,
-                    status=status
+                    status=status,
+                    delivery_progress=msg_data.get("delivery_progress", {})
                 )
                 
                 self.delayed_messages[msg_id] = delayed_msg
@@ -1025,12 +1028,16 @@ class TelegramBotController:
                             success = await self.discord_bot.send_message_with_files_to_channel(
                                 channel_id=self.discord_bot._private_channel_id,
                                 message_content=delayed_msg.text,
-                                file_paths=file_paths
+                                file_paths=file_paths,
+                                progress=delayed_msg.delivery_progress,
+                                on_progress=self.save_delayed_messages
                             )
                         else:
                             success = await self.discord_bot.send_message_to_channel(
                                 channel_id=self.discord_bot._private_channel_id,
-                                message_content=delayed_msg.text
+                                message_content=delayed_msg.text,
+                                progress=delayed_msg.delivery_progress,
+                                on_progress=self.save_delayed_messages
                             )
                         
                         if success:
@@ -1162,8 +1169,10 @@ class TelegramBotController:
         
         # Формируем информацию о вложениях
         attachments_info = ""
+        if msg.delivery_progress.get("uncertain"):
+            attachments_info += "\n⚠️ Ответ Discord потерян. Проверьте последнюю часть перед повтором: она могла доставиться."
         if msg.attachments:
-            attachments_info = f"\n*Вложения:* {len(msg.attachments)}"
+            attachments_info += f"\n*Вложения:* {len(msg.attachments)}"
             for att in msg.attachments[:3]:  # Показываем первые 3 файла
                 att_type = "🖼" if att.is_image else "📁"
                 size_mb = att.file_size / (1024 * 1024)
@@ -1237,6 +1246,10 @@ class TelegramBotController:
         if message_id not in self.delayed_messages:
             await message.answer("❌ Сообщение не найдено")
             await state.clear()
+            return
+
+        if self.delayed_messages[message_id].delivery_progress.get("next_part", 0):
+            await message.answer("❌ Сообщение частично отправлено. Создайте новое для изменения текста.")
             return
         
         try:
@@ -1516,6 +1529,9 @@ class TelegramBotController:
             return
         
         msg = self.delayed_messages[message_id]
+        if msg.delivery_progress.get("next_part", 0):
+            await callback.answer("❌ Нельзя менять файлы частично отправленного сообщения")
+            return
         
         if attachment_index >= len(msg.attachments):
             await callback.answer("❌ Вложение не найдено")
@@ -1601,6 +1617,10 @@ class TelegramBotController:
         
         if message_id not in self.delayed_messages:
             await callback.answer("❌ Сообщение не найдено")
+            return
+
+        if self.delayed_messages[message_id].delivery_progress.get("next_part", 0):
+            await callback.answer("❌ Нельзя менять файлы частично отправленного сообщения")
             return
         
         # Сохраняем ID сообщения для добавления вложений

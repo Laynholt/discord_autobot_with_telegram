@@ -282,134 +282,79 @@ class DiscordBot(discord.Client):
         except Exception as e:
             _log.error("Ошибка при переподключении: %s", e)
     
-    async def send_message_to_channel(self, channel_id: int, message_content: str) -> bool:
-        """
-        Отправляет сообщение в указанный канал по его ID
-        
-        Args:
-            channel_id (int): Уникальный идентификатор канала Discord
-            message_content (str): Текст сообщения для отправки
-            
-        Returns:
-            bool: True если сообщение отправлено успешно, False в случае ошибки
-        """
-        max_retries = 3
-        retry_delay = 5
-        
-        for attempt in range(max_retries):
+    async def send_message_to_channel(self, channel_id: int, message_content: str,
+                                      *, progress=None, on_progress=None) -> bool:
+        parts = [(text, []) for text in self._split_long_text(message_content)]
+        return await self._send_parts(channel_id, parts, progress, on_progress)
+
+    async def send_message_with_files_to_channel(self, channel_id: int,
+                                                message_content: str, file_paths: list[str],
+                                                *, progress=None, on_progress=None) -> bool:
+        text_parts = self._split_long_text(message_content)
+        groups = self._split_files(file_paths, MAX_FILES_PER_MESSAGE)
+        parts = [(text_parts[0] if text_parts else "", groups[0] if groups else [])]
+        parts.extend(("", group) for group in groups[1:])
+        parts.extend((text, []) for text in text_parts[1:])
+        return await self._send_parts(channel_id, parts, progress, on_progress)
+
+    async def _send_parts(self, channel_id, parts, progress=None, on_progress=None) -> bool:
+        managed_delivery = progress is not None
+        progress = progress if progress is not None else {}
+        for attempt in range(3):
             try:
-                # Проверяем состояние подключения
                 if self.is_closed():
-                    _log.warning("Соединение закрыто, пытаемся переподключиться (попытка %d/%d)", attempt + 1, max_retries)
                     await self._reconnect_if_needed()
-                    await asyncio.sleep(retry_delay)
+                    await asyncio.sleep(5)
                     continue
-                
-                # Получаем объект канала по его ID
-                channel: discord.abc.Messageable | None = self.get_channel(channel_id) # type: ignore
-                
-                # Проверяем, что канал найден
+                channel = self.get_channel(channel_id)
                 if channel is None:
                     _log.error("Канал с ID %s не найден", channel_id)
                     return False
-                
-                # Разбиваем текст на части если он слишком длинный
-                text_parts = self._split_long_text(message_content)
-
-                # Отправляем сообщение(я) в канал
-                for index, text_part in enumerate(text_parts):
-                    if index > 0:
+                while progress.get("next_part", 0) < len(parts):
+                    index = progress.get("next_part", 0)
+                    text, paths = parts[index]
+                    if index:
                         await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)
-                    await channel.send(text_part)
+                    files = []
+                    try:
+                        for path in paths:
+                            if Path(path).exists():
+                                files.append(discord.File(path))
+                        await channel.send(content=text or None, files=files)
+                    finally:
+                        for file in files:
+                            file.close()
+                    progress["next_part"] = index + 1
+                    progress["uncertain"] = False
+                    # Persist each confirmed part before attempting the next one.
+                    if on_progress:
+                        try:
+                            on_progress()
+                        except OSError:
+                            _log.exception("Не удалось сохранить прогресс доставки")
+                            return False
+                return True
+            except (discord.ConnectionClosed, ConnectionResetError, OSError) as error:
+                # A lost response cannot prove the current part was not delivered.
+                progress["uncertain"] = True
+                if on_progress:
+                    try:
+                        on_progress()
+                    except OSError:
+                        _log.exception("Не удалось сохранить неопределённый результат доставки")
+                        return False
+                _log.warning("Сбой доставки части %s (попытка %s/3); ответ мог потеряться: %s",
+                             progress.get("next_part", 0) + 1, attempt + 1, error)
+                if managed_delivery:
+                    return False  # An explicit retry lets the owner inspect an ambiguous delivery.
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                else:
+                    return self._handle_message_send_error(error, channel_id, "")
+            except Exception as error:
+                return self._handle_message_send_error(error, channel_id, "")
+        return False
 
-                channel_name = getattr(channel, 'name', f'ID:{channel_id}')
-                _log.info("Сообщение успешно отправлено в канал '%s'", channel_name)
-                return True
-                
-            except (discord.ConnectionClosed, ConnectionResetError, OSError) as e:
-                _log.warning("Ошибка соединения (попытка %d/%d): %s", attempt + 1, max_retries, e)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    continue
-                else:
-                    return self._handle_message_send_error(e, channel_id, "")
-                    
-            except (discord.Forbidden, discord.HTTPException, Exception) as e:
-                return self._handle_message_send_error(e, channel_id, "")
-    
-    async def send_message_with_files_to_channel(
-        self, 
-        channel_id: int, 
-        message_content: str, 
-        file_paths: list[str]
-    ) -> bool:
-        """
-        Отправляет сообщение с файлами в указанный канал
-        
-        Args:
-            channel_id: ID канала Discord
-            message_content: Текст сообщения
-            file_paths: Список путей к файлам для отправки
-            
-        Returns:
-            bool: True если сообщение отправлено успешно
-        """
-        max_retries = 3
-        retry_delay = 5
-        
-        for attempt in range(max_retries):
-            try:
-                # Проверяем состояние подключения
-                if self.is_closed():
-                    _log.warning("Соединение закрыто, пытаемся переподключиться (попытка %d/%d)", attempt + 1, max_retries)
-                    await self._reconnect_if_needed()
-                    await asyncio.sleep(retry_delay)
-                    continue
-                
-                channel: discord.abc.Messageable | None = self.get_channel(channel_id) # type: ignore
-                
-                if channel is None:
-                    _log.error("Канал с ID %s не найден", channel_id)
-                    return False
-                
-                # Разбиваем текст на части если он слишком длинный
-                text_parts = self._split_long_text(message_content)
-                
-                # Разбиваем файлы на группы
-                file_groups = self._split_files(file_paths, MAX_FILES_PER_MESSAGE)
-                
-                # Отправляем первую часть текста с первой группой файлов
-                if file_groups:
-                    files = [discord.File(file_path) for file_path in file_groups[0] if Path(file_path).exists()]
-                    await channel.send(content=text_parts[0] if text_parts else "", files=files)
-                    
-                    # Отправляем остальные группы файлов
-                    for file_group in file_groups[1:]:
-                        files = [discord.File(file_path) for file_path in file_group if Path(file_path).exists()]
-                        await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)  # Задержка между сообщениями
-                        await channel.send(files=files)
-                else:
-                    # Если нет файлов, отправляем только текст
-                    await channel.send(content=text_parts[0] if text_parts else "")
-                
-                # Отправляем остальные части текста
-                for text_part in text_parts[1:]:
-                    await asyncio.sleep(SLEEP_DELAY_BETWEEN_MESSAGES)  # Задержка между сообщениями
-                    await channel.send(content=text_part)
-                
-                return True
-                
-            except (discord.ConnectionClosed, ConnectionResetError, OSError) as e:
-                _log.warning("Ошибка соединения при отправке с файлами (попытка %d/%d): %s", attempt + 1, max_retries, e)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    continue
-                else:
-                    return self._handle_message_send_error(e, channel_id, "с файлами")
-                    
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException, Exception) as e:
-                return self._handle_message_send_error(e, channel_id, "с файлами")
-    
     def _handle_message_send_error(self, error: Exception, channel_id: int, error_type: str) -> bool:
         """
         Централизованная обработка ошибок при отправке сообщений
