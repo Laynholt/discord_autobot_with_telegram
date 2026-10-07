@@ -86,9 +86,16 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await c.finalize_delayed_message(state))
         self.assertEqual(c.delayed_messages, {})
         self.assertEqual(c.delayed_tasks, {})
-
         self.assertEqual(c.next_message_id, 2)
         state.clear.assert_not_awaited()
+
+    async def test_missing_attachment_prevents_any_delivery(self):
+        bot = discord_module.DiscordBot(1, 2)
+        send = AsyncMock()
+        bot.get_channel = lambda _: SimpleNamespace(send=send)
+        missing = str(self.controller.attachments_dir / "missing.txt")
+        self.assertFalse(await bot.send_message_with_files_to_channel(1, "hello", [missing]))
+        send.assert_not_awaited()
 
     async def test_partial_delivery_retry_skips_confirmed_parts(self):
         bot = discord_module.DiscordBot(1, 2)

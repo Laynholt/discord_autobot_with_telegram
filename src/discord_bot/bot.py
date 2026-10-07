@@ -290,6 +290,9 @@ class DiscordBot(discord.Client):
     async def send_message_with_files_to_channel(self, channel_id: int,
                                                 message_content: str, file_paths: list[str],
                                                 *, progress=None, on_progress=None) -> bool:
+        if any(not Path(path).is_file() for path in file_paths):
+            _log.error("Доставка отменена: отсутствует вложение")
+            return False
         text_parts = self._split_long_text(message_content)
         groups = self._split_files(file_paths, MAX_FILES_PER_MESSAGE)
         parts = [(text_parts[0] if text_parts else "", groups[0] if groups else [])]
@@ -318,8 +321,7 @@ class DiscordBot(discord.Client):
                     files = []
                     try:
                         for path in paths:
-                            if Path(path).exists():
-                                files.append(discord.File(path))
+                            files.append(discord.File(path))
                         await channel.send(content=text or None, files=files)
                     finally:
                         for file in files:
