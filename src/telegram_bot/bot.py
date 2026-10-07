@@ -168,7 +168,6 @@ class TelegramBotController:
             messages_data = data.get("messages", {})
             
             current_time = datetime.now(self.moscow_tz)
-            expired_messages = []
             
             for msg_id_str, msg_data in messages_data.items():
                 msg_id = int(msg_id_str)
@@ -177,10 +176,9 @@ class TelegramBotController:
                 date_time = datetime.fromisoformat(msg_data["date_time"])
                 created_at = datetime.fromisoformat(msg_data["created_at"])
                 
-                # Если сообщение просрочено, добавляем в список для удаления
-                if date_time <= current_time and msg_data.get("status", "pending") == "pending":
-                    expired_messages.append((msg_id, msg_data))
-                    continue
+                status = msg_data.get("status", "pending")
+                if date_time <= current_time and status == "pending":
+                    status = "missed"
                 
                 # Создаем объекты вложений
                 attachments = []
@@ -200,37 +198,16 @@ class TelegramBotController:
                     date_time=date_time,
                     created_at=created_at,
                     attachments=attachments,
-                    status=msg_data.get("status", "pending")
+                    status=status
                 )
                 
                 self.delayed_messages[msg_id] = delayed_msg
             
-            # Очищаем просроченные сообщения
-            self._cleanup_expired_messages(expired_messages)
-            
             _log.info(f"Загружено {len(self.delayed_messages)} активных отложенных сообщений")
-            if expired_messages:
-                _log.info(f"Удалено {len(expired_messages)} просроченных сообщений")
                 
         except Exception as e:
             _log.error(f"Ошибка при загрузке отложенных сообщений: {e}")
             raise ValueError(f"Не удалось восстановить очередь из {self.data_file}; файл сохранён") from e
-    
-    def _cleanup_expired_messages(self, expired_messages: list):
-        """Очищает просроченные сообщения и их файлы"""
-        for msg_id, msg_data in expired_messages:
-            try:
-                # Удаляем файлы вложений
-                for att_data in msg_data.get("attachments", []):
-                    file_path = att_data["file_path"]
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                        _log.info(f"Удален файл просроченного сообщения: {file_path}")
-                
-                _log.info(f"Очищено просроченное сообщение #{msg_id}")
-                
-            except Exception as e:
-                _log.error(f"Ошибка при очистке просроченного сообщения #{msg_id}: {e}")
     
     def _restore_delayed_tasks(self):
         """Восстанавливает задачи планировщика для загруженных отложенных сообщений"""
@@ -1175,7 +1152,7 @@ class TelegramBotController:
         msg = self.delayed_messages[message_id]
         
         builder = InlineKeyboardBuilder()
-        if msg.status == "failed":
+        if msg.status in {"failed", "missed"}:
             builder.row(InlineKeyboardButton(text="🔄 Повторить отправку", callback_data=f"retry_delayed_{message_id}"))
         builder.row(InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"edit_text_{message_id}"))
         builder.row(InlineKeyboardButton(text="⏰ Изменить время", callback_data=f"edit_datetime_{message_id}"))
@@ -1210,7 +1187,7 @@ class TelegramBotController:
             return
         message_id = int(callback.data.split("_")[-1])
         job = self.delayed_messages.get(message_id)
-        if job is None or job.status != "failed":
+        if job is None or job.status not in {"failed", "missed"}:
             await callback.answer("❌ Сообщение уже отправляется или отсутствует")
             return
         try:
@@ -1900,6 +1877,14 @@ class TelegramBotController:
     async def start_polling(self):
         """Запуск бота"""
         _log.info("Запуск Telegram бота...")
+        recovery_count = sum(job.status in {"failed", "missed"} for job in self.delayed_messages.values())
+        if recovery_count:
+            try:
+                await self.bot.send_message(self.owner_id,
+                    f"⚠️ Сохранено сообщений, требующих внимания: {recovery_count}. "
+                    "Откройте отложенные сообщения для повтора, переноса или удаления.")
+            except Exception:
+                _log.exception("Не удалось уведомить о восстановленных сообщениях")
         await self.dp.start_polling(self.bot)
     
     async def stop(self):

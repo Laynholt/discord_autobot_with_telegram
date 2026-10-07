@@ -126,3 +126,14 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         c.load_delayed_messages()
         self.assertEqual(len(c.delayed_messages[1].attachments), 1)
         state.clear.assert_awaited_once()
+
+    async def test_overdue_jobs_remain_available_without_auto_send(self):
+        c = self.controller
+        job = self.job(True)
+        c.save_delayed_messages()
+        c.delayed_messages.clear()
+        c.load_delayed_messages()
+        self.assertEqual(c.delayed_messages[1].status, "missed")
+        self.assertTrue(Path(job.attachments[0].file_path).exists())
+        c._restore_delayed_tasks()
+        self.assertEqual(c.delayed_tasks, {})
