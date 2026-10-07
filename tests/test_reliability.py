@@ -234,3 +234,19 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(Path(job.attachments[0].file_path).exists())
         state.clear.assert_awaited_once()
         handler.assert_awaited_once()
+
+    async def test_past_explicit_date_and_expired_draft_are_rejected(self):
+        c = self.controller
+        now = datetime.now(c.moscow_tz)
+        past = now - timedelta(days=1)
+        with self.assertRaises(ValueError):
+            c.parse_datetime_string(past.strftime("%d.%m.%Y %H:%M:%S"))
+        self.assertGreater(c.parse_datetime_string(now.strftime("%H:%M")), now)
+        state = SimpleNamespace(get_data=AsyncMock(return_value={
+            "delayed_message_id": 2, "delayed_message_text": "draft",
+            "delayed_message_datetime": past,
+        }), clear=AsyncMock(), set_state=AsyncMock())
+        self.assertFalse(await c.finalize_delayed_message(state))
+        self.assertEqual(c.delayed_tasks, {})
+        self.assertEqual(c.delayed_messages, {})
+        state.clear.assert_not_awaited()

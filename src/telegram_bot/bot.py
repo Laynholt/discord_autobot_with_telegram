@@ -924,7 +924,7 @@ class TelegramBotController:
                 delayed_message_text=text,
                 delayed_message_datetime=target_datetime,
                 delayed_message_id=self.next_message_id,
-                delayed_message_attachments=[]
+                delayed_message_attachments=data.get("delayed_message_attachments", [])
             )
             
             builder = InlineKeyboardBuilder()
@@ -1006,7 +1006,7 @@ class TelegramBotController:
                 else:
                     dt = datetime.strptime(datetime_str, "%d.%m.%Y %H:%M")
                     
-                return moscow_now.replace(
+                target_dt = moscow_now.replace(
                     year=dt.year,
                     month=dt.month,
                     day=dt.day,
@@ -1017,6 +1017,9 @@ class TelegramBotController:
                 )
             except ValueError:
                 raise ValueError("Неверный формат полной даты. Используйте ДД.ММ.ГГГГ ЧЧ:ММ или ДД.ММ.ГГГГ ЧЧ:ММ:СС")
+            if target_dt <= moscow_now:
+                raise ValueError("Время отправки должно быть в будущем")
+            return target_dt
         
         else:
             raise ValueError("Неизвестный формат даты/времени")
@@ -1868,6 +1871,9 @@ class TelegramBotController:
             text = data["delayed_message_text"]
             target_datetime = data["delayed_message_datetime"]
             attachments = data.get("delayed_message_attachments", [])
+            if target_datetime <= datetime.now(self.moscow_tz):
+                await state.set_state(BotStates.waiting_delayed_message_datetime)
+                raise ValueError("Время отправки уже прошло. Введите новую дату; загруженные файлы сохранены.")
             
             # Создаем отложенное сообщение
             delayed_msg = DelayedMessage(
