@@ -101,3 +101,15 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(c.delayed_messages[1], job)
         self.assertTrue(Path(job.attachments[0].file_path).exists())
         task.cancel.assert_not_called()
+
+    async def test_duplicate_attachment_names_are_unique(self):
+        c = self.controller
+        c.bot.get_file = AsyncMock(return_value=SimpleNamespace(file_path="remote"))
+        async def download(remote, path):
+            Path(path).write_text(str(c.bot.download_file.await_count))
+        c.bot.download_file = AsyncMock(side_effect=download)
+        first = await c.download_file("one", "report.txt", 1)
+        second = await c.download_file("two", "report.txt", 1)
+        self.assertNotEqual(first, second)
+        self.assertEqual(Path(first).read_text(), "1")
+        self.assertEqual(Path(second).read_text(), "2")

@@ -4,6 +4,7 @@ import json
 import shutil
 import asyncio
 import logging
+from uuid import uuid4
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -310,11 +311,15 @@ class TelegramBotController:
         
         # Создаем уникальное имя файла
         safe_name = "".join(c for c in file_name if c.isalnum() or c in ".-_")
-        temp_filename = f"{message_id}_{safe_name}"
+        temp_filename = f"{message_id}_{uuid4().hex}_{safe_name[:80]}"
         temp_path = self.attachments_dir / temp_filename
         
         # Скачиваем файл
-        await self.bot.download_file(file_info.file_path, temp_path)
+        try:
+            await self.bot.download_file(file_info.file_path, temp_path)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
         return str(temp_path)
     
     def is_image_file(self, file_name: str) -> bool:
